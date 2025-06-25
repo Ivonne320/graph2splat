@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn import LazyLinear
 
 from configs import AutoencoderConfig
 from src.models.backbones import (
@@ -13,6 +14,7 @@ from src.models.backbones import (
 )
 from src.modules.sparse.basic import SparseTensor
 from src.modules.sparse.linear import SparseLinear
+from src.models.gnn_refine import SceneGraphRefiner
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +30,38 @@ class AutoEncoder(nn.Module):
         self.cfg = cfg
         self.out_feature_dim = cfg.encoder.voxel.out_feature_dim
         self.channels = cfg.encoder.voxel.channels
+
+        # # gnn module
+ 
+        # # self.gnn = SceneGraphRefiner(embed_dim=cfg.encoder.global_descriptor_dim)
+        # self.gnn = SceneGraphRefiner(embed_dim=512)
+        # out_features = cfg.encoder.voxel.out_feature_dim
+        # final_res = cfg.encoder.voxel.in_channel_res // 2 ** (len(cfg.encoder.voxel.channels) - 1)
+        # decoder_input_dim = out_features * final_res ** 3
+        
+        # # self.gnn_to_decoder_proj = nn.Linear(
+        # #     in_features=cfg.encoder.global_descriptor_dim,
+        # #     out_features=decoder_input_dim,
+        # # )
+
+        # self.gnn_to_decoder_proj = nn.Sequential(
+        #     # nn.Linear(cfg.encoder.global_descriptor_dim, 128),     # ~262K
+        #     nn.Linear(512, 1024), 
+        #     nn.ReLU(),
+        #     nn.Linear(1024, decoder_input_dim)    # ~33.5M
+        # )
+
+        # # self.embedding_proj = nn.Linear(
+        # #     in_features=decoder_input_dim,
+        # #     # out_features=cfg.encoder.global_descriptor_dim,
+        # #     out_features = 512
+        # # )
+        # self.embedding_proj = nn.Sequential(
+        #     nn.Linear(decoder_input_dim, 1024),
+        #     nn.ReLU(),
+        #     nn.Linear(1024, 512),
+        # )
+        # self.gnn_ln = nn.LayerNorm(512).to(device)
 
         self.encoder = MultiModalEncoder(
             modules=cfg.encoder.modules,
@@ -69,6 +103,19 @@ class AutoEncoder(nn.Module):
         )
         self.voxel_decoder = nn.Sequential(*modules).to(device)
 
+    # def initialize_lazy_modules(self, embedding: torch.Tensor, edge_index: torch.Tensor) -> None:
+    #         """
+    #         Dummy forward to initialize LazyLinear modules.
+    #         """
+    #         # Run through embedding_proj
+    #         projected_embedding = self.embedding_proj(embedding)
+
+    #         # Run through GNN
+    #         embedding_refined = self.gnn(projected_embedding, edge_index)
+
+    #         # Run through gnn_to_decoder_proj
+    #         _ = self.gnn_to_decoder_proj(embedding_refined)
+    
     def encode(self, x):
         embs = self.encoder(x)
         return embs["joint"]

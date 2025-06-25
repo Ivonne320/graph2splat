@@ -42,7 +42,7 @@ autoencoder:
     img_emb_dim: 256
     multi_view_aggregator: 'transformer'
     use_pretrained : False
-    # pretrained: ""
+    pretrained: ""
     label_file_name : labels.instances.annotated.v2.ply
     pred_subfix     : inseg.ply
     modules       : ['voxel']
@@ -118,7 +118,7 @@ train:
   pc_res: 512
   aux_channels: 0
   batch_size: 1
-  num_workers: 1
+  num_workers: 2
   use_pretrained: False
   optim:
     lr: 0.001

@@ -233,6 +233,10 @@ def rasterize_splats(
     opacities = torch.sigmoid(splats["opacities"])  # [N,]
 
     colors = torch.cat([splats["sh0"], splats["shN"]], 1)  # [N, K, 3]
+    # if splats["shN"].shape[1] > 0:
+    #     colors = torch.cat([splats["sh0"], splats["shN"]], 1)  # [N, K, 3]
+    # else:
+    #     colors = splats["sh0"]  # Only DC component
 
     rasterize_mode = "classic"
     if type_ == "3dgs":

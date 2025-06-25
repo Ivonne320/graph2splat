@@ -20,7 +20,7 @@ done
 
 # Set output directory
 timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
-export VLSG_TRAINING_OUT_DIR="$SCRATCH/training_recon_scene/$timestamp"
+export VLSG_TRAINING_OUT_DIR="$SCRATCH/training_recon_gnn/$timestamp"
 
 # Initialize conda and activate the environment
 # source .venv/bin/activate
@@ -30,4 +30,4 @@ cd "$VLSG_SPACE" || { echo "Failed to change directory to $VLSG_SPACE"; exit 1; 
 export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
 
 # Run training script
-python src/trainval/train_reconstruction.py --config scripts/train_val/train.yaml --log_steps 1 output_dir=\"$VLSG_TRAINING_OUT_DIR\" ${args[@]}
+python src/trainval/train_reconstruction_with_gnn.py --config scripts/train_val/train.yaml --log_steps 1 output_dir=\"$VLSG_TRAINING_OUT_DIR\" ${args[@]}

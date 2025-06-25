@@ -281,6 +281,12 @@ class Gaussian:
             f_rest = f_rest.reshape(-1, 15, 3)  # [N, 15, 3], assuming SH degree 3
         sh = torch.concatenate((sh0, f_rest), axis=1)  # [N, 16, 3]
         sh = sh.transpose(1, 2)  # [N, 3, 16]
+        # if self.sh_degree == 0 or self._features_rest is None:
+        #     f_rest = torch.empty(sh0.shape[0], 15, 3, device=sh0.device)
+        #     sh = sh0.transpose(1, 2)  # [N, 3, 1]
+        # else:
+        #     f_rest = self._features_rest.reshape(-1, 15, 3)
+        #     sh = torch.cat((sh0, f_rest), dim=1).transpose(1, 2)  # [N, 3, 16]
 
         splats = {
             "means": xyz.float(),

@@ -1,4 +1,5 @@
 import argparse
+from argparse import Namespace
 import logging
 import os
 import time
@@ -29,6 +30,7 @@ from src.models.losses.reconstruction import LPIPS
 from utils import common, scan3r
 from utils.gaussian_splatting import GaussianSplat
 from utils.loss_utils import l1_loss, ssim
+from utils.graphics_utils import getProjectionMatrix
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
@@ -189,6 +191,13 @@ class Trainer(EpochBasedTrainer):
             image_masked = image * mask
 
             pose_camera_to_world = np.linalg.inv(pose_quatmat_to_rotmat(extrinsics))
+            world_to_camera = np.linalg.inv(pose_camera_to_world)
+            world_view_transform = torch.tensor(world_to_camera, device="cuda", dtype=torch.float32)
+            fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+            fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+            full_proj_transform = world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0)).squeeze(0)
+            
             viewpoint_camera = MiniCam(
                 width=int(intrinsics["width"]),
                 height=int(intrinsics["height"]),
@@ -196,8 +205,11 @@ class Trainer(EpochBasedTrainer):
                 fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
                 znear=0.01,
                 zfar=100.0,
-                R=pose_camera_to_world[:3, :3].T,
-                T=pose_camera_to_world[:3, 3],
+                # R=pose_camera_to_world[:3, :3].T,
+                # T=pose_camera_to_world[:3, 3],
+                world_view_transform=world_view_transform,
+                full_proj_transform=full_proj_transform,
+    
             )
             reconstruction[i].rescale(
                 torch.tensor([2, 2, 2], device=reconstruction[i].get_xyz.device)
@@ -207,15 +219,22 @@ class Trainer(EpochBasedTrainer):
             )
             reconstruction[i].rescale(scales[i])
             reconstruction[i].translate(translations[i])
+            
+            pipe_cfg = Namespace(
+                debug=False,
+                compute_cov3D_python=False,
+                convert_SHs_python=False
+            )
 
             rendered_image = render(
                 viewpoint_camera,
                 reconstruction[i],
-                pipe={
-                    "debug": False,
-                    "compute_cov3D_python": False,
-                    "convert_SHs_python": False,
-                },
+                # pipe={
+                #     "debug": False,
+                #     "compute_cov3D_python": False,
+                #     "convert_SHs_python": False,
+                # },
+                pipe = pipe_cfg,
                 bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
             )["render"]
 

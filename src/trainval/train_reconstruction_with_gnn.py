@@ -1,4 +1,5 @@
 import argparse
+from argparse import Namespace
 import logging
 import time
 from typing import Any, Dict, Tuple
@@ -6,6 +7,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 from gaussian_renderer import render
 from PIL import Image
 from scene.cameras import MiniCam
@@ -15,6 +17,7 @@ from torchvision.utils import save_image
 from configs import Config, update_configs
 from src.datasets import Scan3RPatchObjectDataset
 from src.datasets.loaders import get_train_val_data_loader
+from src.representations.gaussian.gaussian_model import Gaussian
 from src.engine import EpochBasedTrainer
 from src.models.autoencoder import AutoEncoder
 from src.models.latent_autoencoder import LatentAutoencoder
@@ -25,12 +28,24 @@ from utils import common
 from utils.geometry import pose_quatmat_to_rotmat
 from utils.graphics_utils import focal2fov
 from utils.graphics_utils import getProjectionMatrix
+from utils.gaussian_splatting import GaussianSplat
+from utils.loss_utils import l1_loss, ssim
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
 
 _FILL = 0.0
+_REPRESENTATION_CONFIG = {
+    "perturb_offset": True,
+    "voxel_size": 1.5,
+    "num_gaussians": 32,
+    "2d_filter_kernel_size": 0.1,
+    "3d_filter_kernel_size": 9e-4,
+    "scaling_bias": 4e-3,
+    "opacity_bias": 0.1,
+    "scaling_activation": "softplus",
+}
 
 
 class Trainer(EpochBasedTrainer):
@@ -41,6 +56,7 @@ class Trainer(EpochBasedTrainer):
         self.cfg = cfg
         self.root_dir = cfg.data.root_dir
         self.modules: list = cfg.autoencoder.encoder.modules
+        self.rep_config = _REPRESENTATION_CONFIG
 
         # Loss params
         self.zoom: float = cfg.train.loss.zoom
@@ -64,8 +80,8 @@ class Trainer(EpochBasedTrainer):
         model = self.create_model()
         self.register_model(model)
 
-        self.loss = nn.MSELoss()
-        self.masked_loss = mse_mask_loss
+        # self.loss = nn.MSELoss()
+        # self.masked_loss = mse_mask_loss
 
         optimizer = optim.AdamW(
             self.model.parameters(),
@@ -127,10 +143,13 @@ class Trainer(EpochBasedTrainer):
 
     
 
-    def create_model(self) -> AutoEncoder:
-        model = AutoEncoder(cfg=self.cfg.autoencoder, device=self.device)
+    def create_model(self) -> SceneGraphRefiner:
+        model = SceneGraphRefiner(input_dim=9, hidden_dim=4, output_dim = 9, heads = 2, vol_shape = (64,64,64))
         model.to(self.device)
         self.latent_autoencoder = LatentAutoencoder(
+            cfg=self.cfg.autoencoder, device=self.device
+        )
+        self.autoencoder = AutoEncoder(
             cfg=self.cfg.autoencoder, device=self.device
         )
         self.latent_autoencoder.load_state_dict(
@@ -138,50 +157,30 @@ class Trainer(EpochBasedTrainer):
                 self.cfg.autoencoder.encoder.voxel.pretrained, map_location=self.device
             )["model"]
         )
+        print("loading from ",self.cfg.autoencoder.encoder.pretrained  )
+        self.autoencoder.load_state_dict(
+            torch.load(self.cfg.autoencoder.encoder.pretrained, map_location=self.device
+            )["model"],
+            strict=False,
+        )
         self.latent_autoencoder.eval()
+        self.autoencoder.eval()
         self.latent_autoencoder.to(self.device)
+        # self.latent_autoencoder.to("cpu")
+        self.autoencoder.to(self.device)
         for param in self.latent_autoencoder.parameters():
             param.requires_grad = False
-
-        # # Dummy input initialization for LazyLinear modules
-        # embed_dim = self.cfg.autoencoder.encoder.img_emb_dim  # same as embedding.shape[-1] at runtime
-        # global_dim = self.cfg.autoencoder.encoder.global_descriptor_dim
-        # decoder_dim = self.cfg.autoencoder.encoder.voxel.in_feature_dim
-
-        # dummy_embedding = torch.randn(2, embed_dim).to(self.device)
-        # dummy_edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long).to(self.device)
-
-        # model.initialize_lazy_modules(dummy_embedding, dummy_edge_index)
+        for param in self.latent_autoencoder.decoder.parameters():
+            param.requires_grad = False
+        for param in self.autoencoder.parameters():
+            param.requires_grad = False
         message: str = "Model created"
         self.logger.info(message)
-        # num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        # self.logger.info(f"Number of parameters: {num_params}")
-       
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self.logger.info(f"Number of parameters: {num_params}")
+
         return model
 
-    def compute_decaying_weight(
-        self,
-        initial_weight: float = 100.0,
-        final_weight: float = 1.0,
-        max_epochs: int = 5,
-    ) -> float:
-        """
-        Compute an exponentially decaying weight.
-
-        Args:
-            epoch (int): Current epoch number.
-            initial_weight (float): The starting weight value.
-            final_weight (float): The weight value to decay towards.
-            max_epochs (int): The epoch number at which the weight should approach final_weight.
-
-        Returns:
-            float: The decayed weight value for the given epoch.
-        """
-        decay_rate = -np.log(final_weight / initial_weight) / max_epochs
-        weight = final_weight + (initial_weight - final_weight) * np.exp(
-            -decay_rate * self.epoch
-        )
-        return weight
     
     # Add edge_index construction utility
     def build_edge_index(self, obj_positions, threshold=1.5):
@@ -194,7 +193,7 @@ class Trainer(EpochBasedTrainer):
                     edge_list.append([i, j])
         if not edge_list:
             return torch.empty((2, 0), dtype=torch.long)
-        return torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+        return torch.tensor(edge_list, dtype=torch.long, device=obj_positions.device).t().contiguous()
 
 
     def _densify(self, sparse_splat):
@@ -232,15 +231,10 @@ class Trainer(EpochBasedTrainer):
     def train_step(
         self, epoch: int, iteration: int, data_dict: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        assert self.model is not None and isinstance(self.model, AutoEncoder)
-
-        if data_dict["scene_graphs"]["tot_obj_splat"].shape[0] > 100:
-            return {}, {}
-        if not self.cfg.data.preload_slat:
-            sparse_splat = self.latent_autoencoder.encode(data_dict)
-        else:
-            sparse_splat = data_dict["scene_graphs"]["tot_obj_splat"]
-
+        assert self.model is not None and isinstance(self.model, SceneGraphRefiner)
+        torch.cuda.empty_cache()
+        print(f"At the beginning of trainer: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
         # AVOID OVERFLOW CUDA
         if data_dict["scene_graphs"]["tot_obj_splat"].shape[0] > 100:
             self.logger.info(
@@ -249,52 +243,174 @@ class Trainer(EpochBasedTrainer):
             return {}, {}
 
         if not self.cfg.data.preload_slat:
-            sparse_splat = self.latent_autoencoder.encode(data_dict)
+            with torch.no_grad():
+                sparse_splat = self.latent_autoencoder.encode(data_dict)
         else:
             sparse_splat = data_dict["scene_graphs"]["tot_obj_splat"]
-
+        print(f"After latent_autoencoder.encode: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
         data_dict["scene_graphs"]["tot_obj_dense_splat"] = self._densify(sparse_splat)
-        embedding = self.model.encode(data_dict)
-        print("encode() output shape:", embedding.shape[-1])
-        
-        # # update embedding_proj 
-        # if self.embedding_proj is None:
-        #     embedding_dim_in = embedding.shape[-1]
-        #     self.embedding_proj = nn.Linear(embedding_dim_in, self.cfg.autoencoder.encoder.global_descriptor_dim).to(self.device)
-        #     self.model.embedding_proj = self.embedding_proj
-        #     self.optimizer.add_param_group({'params': self.embedding_proj.parameters()})
-        
+        del sparse_splat
+        torch.cuda.empty_cache()
+        with torch.no_grad():
+            embedding = self.autoencoder.encode(data_dict)
+        print("encode() output shape:", embedding.shape[-1])   
+        print(f"After autoencoder.encode: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")     
+        with torch.no_grad():
+            reconstruction = self.autoencoder.decode(embedding)
+        print(f"After autoencoder.decode: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+        del embedding
+        torch.cuda.empty_cache()
+        # 2. Global feature pooling for GNN nodes
+        obj_feats = F.adaptive_avg_pool3d(reconstruction, 1).squeeze(-1).squeeze(-1).squeeze(-1)  # (N_obj, C)
+        edge_index = self.build_edge_index(data_dict["scene_graphs"]["mean_obj_splat"])
+        refined_reconstruction_dense = self.model(obj_feats, edge_index, reconstruction)
+        print(f"After model: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+        refined_reconstruction_sparse = self._sparsify(refined_reconstruction_dense)
+        # refined_reconstruction_sparse =self._sparsify(reconstruction)
+        del reconstruction
+        torch.cuda.empty_cache()
         # with torch.no_grad():
-        #     obj_positions = data_dict["scene_graphs"]["mean_obj_splat"]  # (N, 3)
+        print(f"Before latent_autoencoder.decode: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+        # with torch.no_grad():
+        refined_reconstruction = self.latent_autoencoder.decode(refined_reconstruction_sparse)
+        print(f"After latent_autoencoder.decode: [GPU] Mem Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"[GPU] Mem Cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+        # refined_reconstruction = refined_reconstruction_sparse
+        # del  refined_reconstruction_sparse
+        torch.cuda.empty_cache()
+        ## assemble objects into scene
         
-        # edge_index = self.build_edge_index(obj_positions)
+        scene_ids = data_dict["scene_graphs"]["scene_ids"]
+        obj_ids = data_dict["scene_graphs"]["obj_ids"]
+        intrinsic = data_dict["scene_graphs"]["obj_intrinsics"]
+        frames = data_dict["scene_graphs"]["obj_img_top_frames"]
+        # masks = data_dict["scene_graphs"]["obj_annos"]
+        translations = data_dict["scene_graphs"]["mean_obj_splat"]
+        scales = data_dict["scene_graphs"]["scale_obj_splat"]
+        scene_id = scene_ids[0][0]
+        intrinsics = intrinsic[scene_id]
+        img_poses = data_dict["scene_graphs"]["obj_img_poses"][scene_id]
 
-        # projected_embedding = self.model.embedding_proj(embedding)
-        # # Build edge_index and apply GNN
-        # gnn_out  = self.model.gnn(projected_embedding, edge_index.to(embedding.device))
+        def _scale(x):
+            i, splat = x
+            if splat._xyz.numel() <= 0:
+                return splat
+            assert (
+                splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 1 + 1e-2
+            ), f"{splat._xyz.min()} {splat._xyz.max()}"
+            splat.rescale(
+                torch.tensor([2, 2, 2], device=refined_reconstruction[i].get_xyz.device)
+            )
+            assert (
+                splat._xyz.min() >= -1e-2 and splat._xyz.max() <= 2.0 + 1e-2
+            ), f"{splat._xyz.min()} {splat._xyz.max()}"
+            splat.translate(
+                -torch.tensor([1, 1, 1], device=refined_reconstruction[i].get_xyz.device)
+            )
+            assert (
+                splat._xyz.min() >= -1.0 - 1e-2 and splat._xyz.max() <= 1.0 + 1e-2
+            ), f"{splat._xyz.min()} {splat._xyz.max()}"
+            splat.rescale(scales[i])
+            splat.translate(translations[i])
+            return splat
         
-        # embedding_refined = self.model.gnn(projected_embedding, edge_index.to(embedding.device))
-        # embedding_refined = self.model.gnn_ln(projected_embedding + gnn_out)
-        # embedding_refined = embedding_refined + projected_embedding # residule skip
-        # embedding_refined = projected_embedding
-       
-        reconstruction = self.model.decode(embedding)
-        # reconstruction = self.model.decode(self.model.gnn_to_decoder_proj(embedding_refined))
-        mask = data_dict["scene_graphs"]["tot_obj_dense_splat"][:, -1]
-        loss_occupancy = self.loss(reconstruction[:, -1], mask)
-        loss_features = self.masked_loss(
-            reconstruction[:, :-1],
-            data_dict["scene_graphs"]["tot_obj_dense_splat"][:, :-1],
-            mask.unsqueeze(1),
+        refined_reconstruction = list(map(lambda x: _scale(x), enumerate(refined_reconstruction))) 
+        # del reconstruction
+        torch.cuda.empty_cache()
+
+        assembled_scene = Gaussian(
+            sh_degree=0,
+            aabb=[-0.0, -0.0, -0.0, 1.0, 1.0, 1.0],
+            mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
+            scaling_bias=self.rep_config["scaling_bias"],
+            opacity_bias=self.rep_config["opacity_bias"],
+            scaling_activation=self.rep_config["scaling_activation"],
+        )
+        
+        assembled_scene._xyz = torch.concatenate(
+            [refined_reconstruction[i]._xyz for i in range(len(refined_reconstruction))]
+        )
+        assembled_scene._features_dc = torch.concatenate(
+            [refined_reconstruction[i]._features_dc for i in range(len(refined_reconstruction))]
+        )
+        assembled_scene._opacity = torch.concatenate(
+            [refined_reconstruction[i]._opacity for i in range(len(refined_reconstruction))]
+        )
+        assembled_scene._scaling = torch.concatenate(
+            [refined_reconstruction[i]._scaling for i in range(len(refined_reconstruction))]
+        )
+        assembled_scene._rotation = torch.concatenate(
+            [refined_reconstruction[i]._rotation for i in range(len(refined_reconstruction))]
+        )
+             
+        rendered_images, gt_images = [], []
+
+        
+        for i, frame_id in enumerate(sorted(img_poses.keys())[::3]):
+            # extrinsics = img_poses[frame_id][1]
+            obj_id = obj_ids[i]
+            pose_idx = np.random.randint(0, len(img_poses[obj_id]))
+            frame_id = frames[scene_id][obj_id][pose_idx]
+            extrinsics = img_poses[obj_id][pose_idx]
+            image = Image.open(
+                f"{self.cfg.data.root_dir}/scenes/{scene_id}/sequence/frame-{frame_id}.color.jpg"
+            )
+            image = (
+                torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
+            )
+            image = image.to(self.device)
+            pose_camera_to_world = np.linalg.inv(pose_quatmat_to_rotmat(extrinsics))
+            world_to_camera = np.linalg.inv(pose_camera_to_world)
+            world_view_transform = torch.tensor(world_to_camera, device="cuda", dtype=torch.float32)
+            fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+            fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+            full_proj_transform = world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0)).squeeze(0)
+            
+            viewpoint_camera = MiniCam(
+                width=int(intrinsics["width"]),
+                height=int(intrinsics["height"]),
+                fovy=focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"]),
+                fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
+                znear=0.01,
+                zfar=100.0,
+                world_view_transform=world_view_transform,
+                full_proj_transform=full_proj_transform,
+    
+            )
+            rendered_image = render(
+                viewpoint_camera,
+                assembled_scene,
+                pipe={
+                    "debug": False,
+                    "compute_cov3D_python": False,
+                    "convert_SHs_python": False,
+                },
+                bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
+            )["render"]
+            rendered_images.append(rendered_image)
+            gt_images.append(image)
+
+
+        rendered_images = torch.stack(rendered_images).squeeze(1)
+        print(rendered_images.requires_grad)
+        gt_images = torch.stack(gt_images).squeeze(1)
+        photometric_loss = (
+        0.8 * l1_loss(rendered_images, gt_images) +
+        0.2 * (1.0 - ssim(rendered_images, gt_images))
         )
         loss_dict = {
-            "loss": loss_features + self.compute_decaying_weight() * loss_occupancy,
-            "loss_features": loss_features,
-            "loss_occupancy": loss_occupancy,
+            "loss": photometric_loss
         }
 
         output_dict = {
-            "reconstruction": reconstruction,
+            "reconstruction": refined_reconstruction_dense,
+            "scene_reconstruction": assembled_scene,
             "ground_truth": data_dict["scene_graphs"]["tot_obj_dense_splat"],
         }
         output_dict.update(data_dict)
@@ -316,7 +432,7 @@ class Trainer(EpochBasedTrainer):
     def set_train_mode(self) -> None:
         self.training = True
         self.model.train()
-        self.loss.train()
+        # self.loss.train()
         torch.set_grad_enabled(True)
 
     def visualize(

@@ -132,6 +132,7 @@ class VoxelConfig(BaseModel):
     in_channel_res: int = 64
     out_channel_res: int = 32
     pretrained: str = "pretrained/slat_pretrained.pth.tar"
+    # pretrained: str = "pretrained/training_recon_scene/2025-06-19_21-37-35/snapshots/epoch-1.pth.tar"
     channels: list[int] = [16]
 
 
@@ -156,7 +157,8 @@ class EncoderConfig(BaseModel):
     alignment_threshold: float = 0.4
 
     use_pretrained: bool = True
-    pretrained: str = "pretrained/u3dgs_pretrained_16.pth.tar"
+    pretrained: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
+    # pretrained: str = "pretrained/training_recon_scene/2025-06-19_21-37-35/snapshots/best_snapshot.pth.tar"
     backbone: BackboneConfig = Field(default_factory=BackboneConfig)
     patch: PatchConfig = Field(default_factory=PatchConfig)
     obj: ObjConfig = Field(default_factory=ObjConfig)
@@ -170,6 +172,7 @@ class DecoderConfig(BaseModel):
 
 
 class AutoencoderConfig(BaseModel):
+    guidance: bool = False
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     decoder: DecoderConfig = Field(default_factory=DecoderConfig)
 
@@ -236,7 +239,7 @@ class TrainConfig(BaseModel):
     data_aug: DataAugmentationConfig = Field(default_factory=DataAugmentationConfig)
     overfit: bool = False
     overfit_obj_ids: List[int] = Field(default_factory=list)
-    visualize_steps: int = 1
+    visualize_steps: int = 100
     val_steps: int = 1
     inner_val_steps: int = 2000
 
@@ -267,8 +270,9 @@ class ValConfig(BaseModel):
 
 class InferenceConfig(BaseModel):
     slat_model_path: str = "pretrained/slat_pretrained.pth.tar"
-    ulat_model_path: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
-    output_dir: str = "files/gs_embeddings"
+    # ulat_model_path: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
+    ulat_model_path: str = "pretrained/training_recon_scene/2025-06-20_14-32-17_aligned_proj/snapshots/best_snapshot.pth.tar"
+    output_dir: str = "/mnt/hdd4tb/graph2splat_outputs"
 
 
 # Global configuration

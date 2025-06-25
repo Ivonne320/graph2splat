@@ -25,7 +25,7 @@ timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 export VLSG_TRAINING_OUT_DIR="$SCRATCH/test_latent_autoencoder/$timestamp"
 
 # Initialize conda and activate the environment
-source .venv/bin/activate
+# source .venv/bin/activate
 
 # Navigate to VLSG space
 cd "$VLSG_SPACE" || { echo "Failed to change directory to $VLSG_SPACE"; exit 1; }

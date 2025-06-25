@@ -1,8 +1,10 @@
 import argparse
+from argparse import Namespace
 import copy
 import logging
 import os
 import os.path as osp
+import gc
 
 import imageio
 import numpy as np
@@ -23,6 +25,7 @@ from utils import common, mesh, torch_util
 from utils.gaussian_splatting import GaussianSplat
 from utils.geometry import pose_quatmat_to_rotmat
 from utils.graphics_utils import focal2fov
+from utils.graphics_utils import getProjectionMatrix
 
 _REPRESENTATION_CONFIG = {
     "perturb_offset": True,
@@ -38,6 +41,7 @@ _REPRESENTATION_CONFIG = {
 
 _LOGGER = logging.getLogger(__name__)
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 class SceneGraph2UnstructuredLatentPipeline:
     def __init__(
@@ -73,8 +77,29 @@ class SceneGraph2UnstructuredLatentPipeline:
             )["model"],
             strict=False,
         )
+        # print('debug lazy linear dimension', self.model.embedding_proj)
         self.rep_config = self.latent_autoencoder.decoder.rep_config
+        # Print parameter counts
+        print("Total number of parameters:", sum(p.numel() for p in self.model.parameters()))
+        print("Trainable parameters:", sum(p.numel() for p in self.model.parameters() if p.requires_grad))
+        print("Model parameters:")
+        for name, param in self.model.named_parameters():
+            print(name, param.shape)
+        self.model.to(self.device)
+        self.latent_autoencoder.to(self.device) 
         return self.model
+    
+    def build_edge_index(self, obj_positions, threshold=1.5):
+        """Construct edge_index for GNN based on pairwise distances."""
+        N = obj_positions.shape[0]
+        edge_list = []
+        for i in range(N):
+            for j in range(N):
+                if i != j and torch.norm(obj_positions[i] - obj_positions[j]) < threshold:
+                    edge_list.append([i, j])
+        if not edge_list:
+            return torch.empty((2, 0), dtype=torch.long)
+        return torch.tensor(edge_list, dtype=torch.long).t().contiguous()
 
     def _densify(self, sparse_splat, fill=0.0):
         shape = sparse_splat.dense().shape
@@ -109,6 +134,11 @@ class SceneGraph2UnstructuredLatentPipeline:
                 if torch.cuda.is_available()
                 else data_dict
             )
+            if data_dict["scene_graphs"]["tot_obj_splat"].shape[0] > 20:
+                _LOGGER.info(
+                    f"Skipping {data_dict['scene_graphs']['scene_ids'][0]} due to large number of objects {data_dict['scene_graphs']['tot_obj_splat'].shape[0]}"
+                )
+                return
             # Stage 1.
             sparse_splat = self.latent_autoencoder.encode(data_dict)
 
@@ -116,10 +146,25 @@ class SceneGraph2UnstructuredLatentPipeline:
             data_dict["scene_graphs"]["tot_obj_dense_splat"] = self._densify(
                 sparse_splat
             )
+            del sparse_splat
             embedding = self.model.encode(data_dict)
             # Stage 2.
-            reconstruction_dense = self.model.decode(embedding)
+            projected_embedding = self.model.embedding_proj(embedding)
+            obj_positions = data_dict["scene_graphs"]["mean_obj_splat"] # (N, 3)
+            edge_index = self.build_edge_index(obj_positions)
+            gnn_out = self.model.gnn(projected_embedding, edge_index.to(embedding.device))
+            # embedding_refined = self.model.gnn(projected_embedding, edge_index.to(embedding.device))
+            embedding_refined = self.model.gnn_ln(projected_embedding + gnn_out)
+            # embedding_refined = embedding_refined + projected_embedding
+            # with torch.no_grad():
+            #     diff = (embedding_refined).abs().mean().item()
+            #     print("GNN Δ-mean:", diff)
+            del projected_embedding
+            # reconstruction_dense = self.model.decode(embedding)
+            reconstruction_dense = self.model.decode(self.model.gnn_to_decoder_proj(embedding_refined))
             reconstruction_sparse = self._sparsify(reconstruction_dense)
+            del reconstruction_dense, embedding_refined
+            torch.cuda.empty_cache()
 
             # Stage 1.
             reconstruction = self.latent_autoencoder.decode(reconstruction_sparse)
@@ -130,8 +175,9 @@ class SceneGraph2UnstructuredLatentPipeline:
                 data_dict["scene_graphs"]["obj_ids"],
                 data_dict["scene_graphs"]["scene_ids"][0],
             )
-
+        
         self.save_embedding(embedding, means, scales, obj_ids, scan_id)
+        
 
         if self.vis:
             if object_id is not None:
@@ -225,8 +271,8 @@ class SceneGraph2UnstructuredLatentPipeline:
         representation.save_ply(f"vis/{scan_id[0]}_joint.ply")
 
     def save_render(self, reconstruction, scene_ids, means, scales):
-        if not osp.exists("vis/rendered"):
-            os.makedirs("vis/rendered")
+        if not osp.exists("vis/rendered_gnn_registered"):
+            os.makedirs("vis/rendered_gnn_registered")
 
         def _scale(x):
             i, splat = x
@@ -281,17 +327,20 @@ class SceneGraph2UnstructuredLatentPipeline:
         scene_id = scene_ids[0]
         intrinsics = self.dataset.image_intrinsics[scene_id]
         poses = self.dataset.image_poses[scene_id]
-
-        gs_mesh = mesh.splat_to_mesh(
-            splat=copy.deepcopy(representation).to_pt(),
-            Ks=intrinsics["intrinsic_mat"],
-            world_to_cams=poses,
-            width=intrinsics["width"],
-            height=intrinsics["height"],
-            sh_degree_to_use=0,
-            near_plane=0.01,
-            far_plane=100.0,
-        )
+        torch.cuda.empty_cache()
+        gc.collect()
+        del reconstruction_dense, embedding, data_dict
+        torch.cuda.empty_cache()
+        # gs_mesh = mesh.splat_to_mesh(
+        #     splat=copy.deepcopy(representation).to_pt(),
+        #     Ks=intrinsics["intrinsic_mat"],
+        #     world_to_cams=poses,
+        #     width=intrinsics["width"],
+        #     height=intrinsics["height"],
+        #     sh_degree_to_use=0,
+        #     near_plane=0.01,
+        #     far_plane=100.0,
+        # )
 
         for i, frame_id in enumerate(poses):
             extrinsics = poses[frame_id]
@@ -303,6 +352,12 @@ class SceneGraph2UnstructuredLatentPipeline:
             )  # SHape: (3, H, W)
 
             pose_camera_to_world = np.linalg.inv(pose_quatmat_to_rotmat(extrinsics))
+            world_to_camera = np.linalg.inv(pose_camera_to_world)
+            world_view_transform = torch.tensor(world_to_camera, device="cuda", dtype=torch.float32)
+            fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+            fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+            full_proj_transform = world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0)).squeeze(0)
             viewpoint_camera = MiniCam(
                 width=int(intrinsics["width"]),
                 height=int(intrinsics["height"]),
@@ -310,8 +365,10 @@ class SceneGraph2UnstructuredLatentPipeline:
                 fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
                 znear=0.01,
                 zfar=100.0,
-                R=pose_camera_to_world[:3, :3].T,
-                T=pose_camera_to_world[:3, 3],
+                # R=pose_camera_to_world[:3, :3].T,
+                # T=pose_camera_to_world[:3, 3],
+                world_view_transform=world_view_transform,
+                full_proj_transform=full_proj_transform,
             )
 
             rendered_image = render(
@@ -328,7 +385,7 @@ class SceneGraph2UnstructuredLatentPipeline:
             predicted_images.append(rendered_image)
             ground_truth_images.append(image)
 
-            frame_path = f"vis/rendered/{scene_id}_frame_{i:03d}.png"
+            frame_path = f"vis/rendered_gnn_registered/{scene_id}_frame_{i:03d}.png"
             save_image(rendered_image, frame_path)
             rendered_frames.append(
                 (rendered_image.detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(
@@ -339,11 +396,11 @@ class SceneGraph2UnstructuredLatentPipeline:
             del image
             torch.cuda.empty_cache()
 
-        video_path = f"vis/rendered/{scene_id}_rendered.mp4"
+        video_path = f"vis/rendered_gnn_registered/{scene_id}_rendered.mp4"
         imageio.mimsave(video_path, rendered_frames, fps=30)
 
     def save_render_orbit(
-        self, reconstruction, scene_ids, means, scales, output_dir="vis/rendered"
+        self, reconstruction, scene_ids, means, scales, output_dir="vis/rendered_gnn_registered"
     ):
         os.makedirs(output_dir, exist_ok=True)
         scene_id = scene_ids[0]
@@ -408,17 +465,18 @@ class SceneGraph2UnstructuredLatentPipeline:
         intrinsics = self.dataset.image_intrinsics[scene_id]
         poses = np.stack(list(self.dataset.image_poses[scene_id].values()))
 
-        gs_mesh = mesh.splat_to_mesh(
-            splat=copy.deepcopy(representation).to_pt(),
-            Ks=intrinsics["intrinsic_mat"],
-            world_to_cams=poses,
-            width=intrinsics["width"],
-            height=intrinsics["height"],
-            sh_degree_to_use=0,
-            near_plane=0.01,
-            far_plane=100.0,
-        )
-        o3d.io.write_triangle_mesh(f"{output_dir}/{scene_id}_mesh.ply", gs_mesh)
+        # gs_mesh = mesh.splat_to_mesh(
+        #     splat=copy.deepcopy(representation).to_pt(),
+        #     # splat=representation.to_pt(),
+        #     Ks=intrinsics["intrinsic_mat"],
+        #     world_to_cams=poses,
+        #     width=intrinsics["width"],
+        #     height=intrinsics["height"],
+        #     sh_degree_to_use=0,
+        #     near_plane=0.01,
+        #     far_plane=100.0,
+        # )
+        # o3d.io.write_triangle_mesh(f"{output_dir}/{scene_id}_mesh.ply", gs_mesh)
 
         for i in range(num_frames):
             theta = i * angle_step
@@ -451,7 +509,11 @@ class SceneGraph2UnstructuredLatentPipeline:
             viewmat[:3, :3] = R
             viewmat[:3, 3] = T
             viewmat = np.linalg.inv(viewmat)
-
+            world_view_transform = torch.tensor(viewmat, device="cuda", dtype=torch.float32)
+            fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+            fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+            full_proj_transform = world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0)).squeeze(0)
             # Create camera instance
             viewpoint_camera = MiniCam(
                 width=int(intrinsics["width"]),
@@ -460,20 +522,28 @@ class SceneGraph2UnstructuredLatentPipeline:
                 fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
                 znear=0.01,
                 zfar=100.0,
-                R=viewmat[:3, :3].T,
-                T=viewmat[:3, 3],
+                # R=viewmat[:3, :3].T,
+                # T=viewmat[:3, 3],
+                world_view_transform=world_view_transform,
+                full_proj_transform=full_proj_transform,
             )
-
-            rendered_image = render(
-                viewpoint_camera,
-                representation,
-                pipe={
-                    "debug": False,
-                    "compute_cov3D_python": False,
-                    "convert_SHs_python": False,
-                },
-                bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
-            )["render"]
+            pipe_cfg = Namespace(
+                debug=False,
+                compute_cov3D_python=False,
+                convert_SHs_python=False
+            )
+            with torch.no_grad():
+                rendered_image = render(
+                    viewpoint_camera,
+                    representation,
+                    # pipe={
+                    #     "debug": False,
+                    #     "compute_cov3D_python": False,
+                    #     "convert_SHs_python": False,
+                    # },
+                    pipe = pipe_cfg,
+                    bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
+                )["render"]
 
             frame_path = f"{output_dir}/{scene_ids[0]}_frame_{i:03d}.png"
             save_image(rendered_image, frame_path)
@@ -491,7 +561,7 @@ class SceneGraph2UnstructuredLatentPipeline:
         print(f"Video saved at {video_path}")
 
     def save_render_orbit_gs(
-        self, scene_ids, obj_ids, means, scales, output_dir="vis/rendered_gs"
+        self, scene_ids, obj_ids, means, scales, output_dir="vis/rendered_gnn_registered_gs"
     ):
         os.makedirs(output_dir, exist_ok=True)
         scene_id = scene_ids[0]
@@ -576,6 +646,12 @@ class SceneGraph2UnstructuredLatentPipeline:
             viewmat[:3, 3] = T
             viewmat = np.linalg.inv(viewmat)
 
+            world_view_transform = torch.tensor(viewmat, device="cuda", dtype=torch.float32)
+            fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
+            fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
+            projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+            full_proj_transform = world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0)).squeeze(0)
+
             # Create camera instance
             viewpoint_camera = MiniCam(
                 width=int(intrinsics["width"]),
@@ -584,8 +660,10 @@ class SceneGraph2UnstructuredLatentPipeline:
                 fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
                 znear=0.01,
                 zfar=100.0,
-                R=viewmat[:3, :3].T,
-                T=viewmat[:3, 3],
+                # R=viewmat[:3, :3].T,
+                # T=viewmat[:3, 3],
+                world_view_transform=world_view_transform,
+                full_proj_transform=full_proj_transform,
             )
 
             rendered_image = render(
@@ -640,7 +718,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--objects_id", type=int, nargs="+", default=None, help="Specific object."
     )
-    parser.add_argument("--split", type=str, default="train", help="Specific split.")
+    # parser.add_argument("--split", type=str, default="train", help="Specific split.")
     return parser.parse_known_args()
 
 

@@ -24,7 +24,7 @@ class EpochBasedTrainer(BaseTrainer):
         cudnn_deterministic=True,
         autograd_anomaly_detection=False,
         save_all_snapshots=True,
-        run_grad_check=False,
+        run_grad_check=True,
         grad_acc_steps=1,
     ):
         super().__init__(
@@ -139,6 +139,7 @@ class EpochBasedTrainer(BaseTrainer):
                 result_dict["loss"].backward(retain_graph=False)
             except (RuntimeError, KeyError) as e:
                 self.logger.warning(e)
+                # print("backward error")
                 data_dict = self.release_tensors(data_dict)
                 if output_dict is not None:
                     output_dict = self.release_tensors(output_dict)

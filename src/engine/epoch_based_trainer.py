@@ -24,7 +24,7 @@ class EpochBasedTrainer(BaseTrainer):
         cudnn_deterministic=True,
         autograd_anomaly_detection=False,
         save_all_snapshots=True,
-        run_grad_check=True,
+        run_grad_check=False,
         grad_acc_steps=1,
     ):
         super().__init__(

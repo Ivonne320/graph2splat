@@ -33,3 +33,4 @@ training_out/
 *.pt
 *.tar
 pretrained/
+slurm*

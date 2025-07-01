@@ -39,7 +39,7 @@ def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
 def _save_featured_voxel(
     voxel: torch.Tensor, output_file: str = "voxel_output_dense.npz"
 ):
-
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     np.savez(output_file, voxel.cpu().numpy())
     _LOGGER.info(f"Voxel saved to {output_file}")
 
@@ -140,14 +140,21 @@ def voxelise_features(
     )
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
     mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
-    rendered = [
-        Image.open(f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg")
-        for frame_id in frame_idxs
-    ]
-    rendered = [
-        torch.Tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
-        for image in rendered
-    ]
+    rendered =  []
+    for frame_id in frame_idxs:
+        path = f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg"
+        with Image.open(path) as img:
+            arr = np.array(img)  # Load full data while file is open
+        tensor = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
+        rendered.append(tensor)
+    # rendered = [
+    #     Image.open(f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg")
+    #     for frame_id in frame_idxs
+    # ]
+    # rendered = [
+    #     torch.Tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
+    #     for image in rendered
+    # ]
     mesh = scan3r.load_ply_mesh(
         data_dir=scenes_dir,
         scan_id=scan_id,
@@ -203,6 +210,7 @@ def voxelise_features(
 
             # STEP 4: Save mean and scale (Scene composition)
             if not args.dry_run:
+                os.makedirs(os.path.dirname(mean_scale_path), exist_ok=True)
                 np.savez(mean_scale_path, mean=mean, scale=scale)
                 _LOGGER.info(f"Saved mean and scale to {mean_scale_path}")
 

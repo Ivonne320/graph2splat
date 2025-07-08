@@ -232,6 +232,23 @@ class Scan3RPatchObjectDataset(data.Dataset):
 
         if self.cfg.mode == "debug_few_scan":
             self.scan_ids = self.scan_ids[: int(0.1 * len(self.scan_ids))]
+            
+        valid_scan_ids = []
+
+        for scan_id in self.scan_ids:
+            scene_path = os.path.join(
+                self.scans_files_dir,
+                    "gs_annotations",
+                    scan_id
+            )
+            if os.path.isdir(scene_path):
+                valid_scan_ids.append(scan_id)
+                
+        # overfitting
+        valid_scan_ids = ['fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630']
+                
+        self.scan_ids = valid_scan_ids
+        self.all_scans_split = valid_scan_ids
 
     def _load_images(self):
         self.image_paths = {}

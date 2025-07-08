@@ -274,6 +274,9 @@ class EpochBasedTrainer(BaseTrainer):
 
         summary_dict = summary_board.summary()
         message = "[Val] " + get_log_string(summary_dict, epoch=self.epoch, timer=timer)
+        if "loss" not in summary_dict:
+            self.logger.warning("No loss in summary_dict; skipping val_loss check.")
+            return
         val_loss = summary_dict["loss"]
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
@@ -315,5 +318,5 @@ class EpochBasedTrainer(BaseTrainer):
             self.epoch += 1
             if self.mode == "train" or self.mode == "debug_few_scan":
                 self.train_epoch()
-            if (self.epoch - 1) % self.val_steps == 0:
-                self.inference_epoch()
+            # if (self.epoch - 1) % self.val_steps == 0:
+            #     self.inference_epoch()

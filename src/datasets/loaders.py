@@ -42,7 +42,7 @@ def get_train_dataloader(
 def get_val_dataloader(
     cfg: Config, dataset: Any
 ) -> tuple[data.Dataset, data.DataLoader]:
-    val_dataset = dataset(cfg, split="val")
+    val_dataset = dataset(cfg, split="train")
     val_dataloader = torch_util.build_dataloader(
         val_dataset,
         batch_size=cfg.val.batch_size,

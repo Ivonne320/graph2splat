@@ -35,6 +35,10 @@ class SceneGraphRefiner(torch.nn.Module):
             nn.ConvTranspose3d(16, output_dim, kernel_size=4, stride=2, padding=1),  
         
         )
+        self.fusion_conv = nn.Sequential(
+            nn.Conv3d(self.feat_dim * 2, self.feat_dim, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
 
     def forward(self, obj_feats, edge_index, volumes):
         """
@@ -49,10 +53,18 @@ class SceneGraphRefiner(torch.nn.Module):
         x = F.relu(self.gnn1(obj_feats, edge_index))
         x = self.gnn2(x, edge_index)
         x = self.layernorm(x)
+        print("GNN output mean abs:", x.abs().mean().item())
+        print("GNN output max abs:", x.abs().max().item())
         
         proj = self.projector(x)
  
         if proj.shape[-3:] != volumes.shape[-3:]:
             proj = F.interpolate(proj, size=volumes.shape[-3:], mode='trilinear', align_corners=False)
+            
+        # === Concatenate and fuse ===
+        fused = torch.cat([volumes, proj], dim=1)  # (N, 2*C, D, H, W)
+        fused = self.fusion_conv(fused)
 
-        return volumes + proj
+        # return volumes + proj
+        # return fused
+        return fused, x, proj

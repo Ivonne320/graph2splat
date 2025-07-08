@@ -134,7 +134,7 @@ train:
     grad_acc_steps: 1
   val_steps: 1
   visualize_steps: 1
-  snapshot_steps: 1
+  snapshot_steps: 10
   loss:
     use_temporal: True
     loss_type: "IntraContrastiveLoss"

@@ -91,7 +91,7 @@ class DataConfig(BaseModel):
     from_gt: bool = True
     debug_few_scans: Optional[int] = None
     preload_masks: bool = False
-    preload_slat: bool = True
+    preload_slat: bool = False
     img: ImageConfig = Field(default_factory=ImageConfig)
     cross_scene: CrossSceneConfig = Field(default_factory=CrossSceneConfig)
     scene_graph: SceneGraphConfig = Field(default_factory=SceneGraphConfig)
@@ -270,8 +270,8 @@ class ValConfig(BaseModel):
 
 class InferenceConfig(BaseModel):
     slat_model_path: str = "pretrained/slat_pretrained.pth.tar"
-    # ulat_model_path: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
-    ulat_model_path: str = "pretrained/training_recon_scene/2025-06-20_14-32-17_aligned_proj/snapshots/best_snapshot.pth.tar"
+    ulat_model_path: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
+    # ulat_model_path: str = "pretrained/training_recon_scene/2025-06-20_14-32-17_aligned_proj/snapshots/best_snapshot.pth.tar"
     output_dir: str = "/mnt/hdd4tb/graph2splat_outputs"
 
 

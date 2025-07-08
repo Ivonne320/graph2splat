@@ -134,6 +134,7 @@ def load_ply_mesh(data_dir, scan_id, label_file_name):
 def load_pose(data_dir, scan_id, frame_id):
     pose_path = osp.join(
         data_dir, "scenes", scan_id, "sequence", "frame-{}.pose.txt".format(frame_id)
+        # data_dir, scan_id, "sequence", "frame-{}.pose.txt".format(frame_id)
     )
     pose = np.genfromtxt(pose_path)
     return pose

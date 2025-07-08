@@ -100,6 +100,12 @@ class Scan3RSceneGraphDataset(data.Dataset):
 
         if self.cfg.mode == "debug_few_scan":
             self.scan_ids = self.scan_ids[: int(0.01 * len(self.scan_ids))]
+        
+        # overfitting
+        valid_scan_ids = ['fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630']
+                
+        self.scan_ids = valid_scan_ids
+        self.all_scans_split = valid_scan_ids
 
     def _load_img_paths(self):
         self.image_paths = {}

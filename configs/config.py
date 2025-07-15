@@ -179,7 +179,7 @@ class AutoencoderConfig(BaseModel):
 
 # Define training classes
 class OptimConfig(BaseModel):
-    lr: float = 0.001
+    lr: float = 0.0005
     scheduler: str = "step"
     lr_decay: float = 0.97
     lr_decay_steps: int = 1
@@ -235,7 +235,7 @@ class TrainConfig(BaseModel):
     pc_res: int = 512
     max_grad_norm: float = 10.0
     train_decoder: bool = True
-    freeze_encoder: bool = False
+    freeze_encoder: bool = True
     data_aug: DataAugmentationConfig = Field(default_factory=DataAugmentationConfig)
     overfit: bool = False
     overfit_obj_ids: List[int] = Field(default_factory=list)
@@ -270,8 +270,8 @@ class ValConfig(BaseModel):
 
 class InferenceConfig(BaseModel):
     slat_model_path: str = "pretrained/slat_pretrained.pth.tar"
-    # ulat_model_path: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
-    ulat_model_path: str = "pretrained/training_recon_scene/2025-06-20_14-32-17_aligned_proj/snapshots/best_snapshot.pth.tar"
+    ulat_model_path: str = "pretrained/u3dgs_pretrained_16_ot.pth.tar"
+    # ulat_model_path: str = "pretrained/training_recon_scene/2025-06-20_14-32-17_aligned_proj/snapshots/best_snapshot.pth.tar"
     output_dir: str = "/mnt/hdd4tb/graph2splat_outputs"
 
 

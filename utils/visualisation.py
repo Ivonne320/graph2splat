@@ -121,10 +121,10 @@ def visualize_object_embeddings(
         cadidate_scans_semantic_ids = (
             data_dict["assoc_data_dict"][i]["cadidate_scans_semantic_ids"].cpu().numpy()
         )
-        joint_embedding = embedding[scans_sg_obj_idxs]
-
+        # joint_embedding = embedding[scans_sg_obj_idxs]
+        joint_embedding = embedding[torch.from_numpy(scans_sg_obj_idxs).long()]
         pca = PCA()
-        pca_result = pca.fit_transform(joint_embedding.detach().cpu().numpy())
+        pca_result = pca.fit_transform(joint_embedding.feats.detach().cpu().numpy())
         num_samples = pca_result.shape[0]
         if num_samples <= 1:
             return
@@ -190,7 +190,7 @@ def save_voxel_as_ply(
     """
 
     points, features = featured_voxel[:, :3], featured_voxel[:, 3:]
-    if show_color:
+    if show_color and features.shape[1] >= 3:
         pca = PCA(n_components=3)
         pca_features = pca.fit_transform(features)
 

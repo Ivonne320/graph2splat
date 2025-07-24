@@ -13,6 +13,7 @@ import torch
 import torch.multiprocessing
 import torch.utils.data as data
 import tqdm
+import json
 
 from configs import Config
 from src.modules.sparse.basic import SparseTensor, sparse_batch_cat, sparse_cat
@@ -30,11 +31,12 @@ def _load_frame_poses(
     return {
         scan_name: scan3r.load_frame_poses(
             scans_scenes_dir, scan_id, tuple(frame_idxs), type="quat_trans"
+            # scans_scenes_dir, scan_id, tuple(frame_idxs)
         )
     }
 
 
-class Scan3RPatchObjectDataset(data.Dataset):
+class Scan3RPatchObjectModifiedDataset(data.Dataset):
     def __init__(self, cfg: Config, split: str):
         self.cfg = cfg
 
@@ -111,6 +113,7 @@ class Scan3RPatchObjectDataset(data.Dataset):
         self.resplit = "resplit_" if cfg.data.resplit else ""
 
         self._load_scan_ids()
+        self._load_held_out_idx()
         self._load_images()
         self._load_extrinsics()
         self._load_intrinsics()
@@ -232,7 +235,9 @@ class Scan3RPatchObjectDataset(data.Dataset):
 
         if self.cfg.mode == "debug_few_scan":
             self.scan_ids = self.scan_ids[: int(0.1 * len(self.scan_ids))]
-        valid_scan_ids = ['fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630']                
+        # valid_scan_ids = ['fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630']                
+        # valid_scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630'] 
+        valid_scan_ids = ['fcf66d88-622d-291c-871f-699b2d063630']                
         self.scan_ids = valid_scan_ids
         self.all_scans_split = valid_scan_ids
 
@@ -259,6 +264,7 @@ class Scan3RPatchObjectDataset(data.Dataset):
                                 scan_id,
                             )
                             for scan_id in self.all_scans_split
+                            # for scan_id in self.scan_ids
                         ],
                         desc="Extrinsics",
                     ),
@@ -338,10 +344,12 @@ class Scan3RPatchObjectDataset(data.Dataset):
 
             for obj_id in self.scene_graphs[scan_id]["obj_ids"]:
                 gs_path = os.path.join(
-                    self.scans_files_dir,
+                    # self.scans_files_dir,
+                    "/home/yihan/3RScan_held_out/files",
                     "gs_annotations",
                     scan_id,
-                    str(obj_id),
+                    # str(obj_id),
+                    "scene_level",
                     f"voxel_output{self.suffix}.npz",
                 )
                 try:
@@ -358,10 +366,12 @@ class Scan3RPatchObjectDataset(data.Dataset):
                 splat = SparseTensor(feats=feats, coords=coords.int())
 
                 mean_scale_path = os.path.join(
-                    self.scans_files_dir,
+                    # self.scans_files_dir,
+                    "/home/yihan/3RScan_held_out/files",
                     "gs_annotations",
                     scan_id,
-                    str(obj_id),
+                    # str(obj_id),
+                    "scene_level",
                     f"mean_scale{self.suffix}.npz",
                 )
                 if os.path.exists(mean_scale_path):
@@ -473,7 +483,24 @@ class Scan3RPatchObjectDataset(data.Dataset):
         points = np.stack([x, y, z], axis=1)
         points = torch.from_numpy(points).type(torch.FloatTensor)
         return points[label == obj_id] if obj_id != -1 else points
-
+    
+    def _load_held_out_idx(self):
+        held_out_path_root = "/home/yihan/3RScan_held_out/files/gs_annotations" 
+        self.held_out_idxs = {}
+        for scan_id in self.scan_ids:
+            heldout_path = osp.join(
+            held_out_path_root, scan_id, "scene_level", "heldout_frame_indices.json"
+            )
+            try:
+                with open(heldout_path, "r") as f:
+                    heldout_frame_ids = json.load(f)
+            except FileNotFoundError:
+                heldout_frame_ids = []
+            self.held_out_idxs[scan_id]=heldout_frame_ids
+           
+                
+        
+    
     def sample_candidate_scenes(self, scan_id: str, num_scenes: int) -> list:
         candidate_scans = []
         scans_same_scene = self.refscans2scans[self.scans2refscans[scan_id]]
@@ -829,6 +856,7 @@ class Scan3RPatchObjectDataset(data.Dataset):
         data_dict["batch_size"] = batch_size
         data_dict["temporal"] = self.temporal
         data_dict["scan_ids"] = np.stack([data["scan_id"] for data in batch])
+        data_dict["held_out_idxs"] = self.held_out_idxs
         if self.temporal:
             data_dict["scan_ids_temp"] = np.stack(
                 [data["scan_id_temporal"] for data in batch]

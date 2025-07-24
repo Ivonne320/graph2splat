@@ -10,8 +10,8 @@ from gaussian_renderer import render
 from scene.cameras import MiniCam
 
 from src.datasets import Scan3RPatchObjectDataset
-from src.datasets import Scan3RObjectDataset
 from src.datasets import Scan3RPatchObjectModifiedDataset
+from src.datasets import Scan3RObjectDataset
 from src.representations.gaussian.gaussian_model import Gaussian
 from utils.geometry import pose_quatmat_to_rotmat
 from utils.graphics_utils import focal2fov
@@ -63,7 +63,7 @@ class Trainer(EpochBasedTrainer):
         train_loader, val_loader = get_train_val_data_loader(
             # cfg, dataset=Scan3RPatchObjectDataset
             # cfg, dataset = Scan3RObjectDataset
-            cfg, dataset=Scan3RPatchObjectModifiedDataset
+            cfg, dataset = Scan3RPatchObjectModifiedDataset
         )
 
         loading_time: float = time.time() - start_time
@@ -166,6 +166,15 @@ class Trainer(EpochBasedTrainer):
         assert self.model is not None and isinstance(self.model, LatentAutoencoder)
         for param in self.model.encoder.parameters():
             param.requires_grad = False
+            
+    def get_extrinsics_by_frame_id(self, scene_id, frame_id, frames, img_poses):
+        for obj_id in frames[scene_id]:
+            if frame_id in frames[scene_id][obj_id]:
+                pose_idx = frames[scene_id][obj_id].index(frame_id)
+                extrinsics = img_poses[scene_id][obj_id][pose_idx]
+                return extrinsics
+            else:
+                raise ValueError(f"Frame {frame_id} not found in scene {scene_id}.")
 
     def train_step(
         self, epoch: int, iteration: int, data_dict: Dict[str, Any]
@@ -180,8 +189,12 @@ class Trainer(EpochBasedTrainer):
         masks = data_dict["scene_graphs"]["obj_annos"]
         translations = data_dict["scene_graphs"]["mean_obj_splat"]
         scales = data_dict["scene_graphs"]["scale_obj_splat"]
-
-        embedding = self.model.encode(data_dict)
+        held_out_idxs = data_dict["held_out_idxs"]
+        # data_dict["scene_graphs"]["tot_obj_splat"] =  data_dict["scene_graphs"]["tot_obj_splat"][0]
+        with torch.no_grad():
+            embedding = self.model.encode(data_dict)
+        # embedding = self.random_subsample_sparse_tensor(sparse_tensor=embedding)
+        embedding = embedding[0]
         # embedding = data_dict["scene_graphs"]["tot_obj_splat"]
         # images = visualize_object_embeddings(data_dict=data_dict, embedding=embedding)
         # plt.show(images)
@@ -199,11 +212,12 @@ class Trainer(EpochBasedTrainer):
         # scene_splat, voxel_size, scene_origin = revoxelize_to_fixed_scene_slat(
         
         # scene_splat, voxel_size, scene_origin, bbox_extent, bbox_min = revoxelize_to_fixed_scene_slat_with_aggregation(  
-        scene_splat, scene_mean, scene_scale = revoxelize_scene_via_normalized_coords(  
-            splat=embedding,
-            means=translations,
-            scales=scales[:, None].repeat(1, 3)  # [B, 3]
-        )
+        # scene_splat, scene_mean, scene_scale = revoxelize_scene_via_normalized_coords(  
+        #     splat=embedding,
+        #     means=translations,
+        #     scales=scales[:, None].repeat(1, 3)  # [B, 3]
+        # )
+        scene_splat = embedding
         visualize_slat_alignment(slat_tensor=scene_splat, obj_idx=3, out_dir = "pretrained/training_scene_decoder/debug/vis/")
         reconstruction = self.model.decode(scene_splat)
         # reconstruction = self.model.decode(embedding)
@@ -217,36 +231,52 @@ class Trainer(EpochBasedTrainer):
         reconstruction[0].translate(
                 -torch.tensor([1, 1, 1], device=reconstruction[0].get_xyz.device)
             )
+        # xyz = reconstruction[0].get_xyz
+        # center = (xyz.min(dim=0).values + xyz.max(dim=0).values) / 2
+        # extent = (xyz.max(dim=0).values - xyz.min(dim=0).values) / 2
+
+        # # Recenter and rescale to roughly [-0.5, 0.5]^3
+        # reconstruction[0].translate(-center)
+        # reconstruction[0].rescale(1.0 / extent)
         # half_extent = voxel_size * (32)
         # reconstruction[0].rescale(
         #     torch.tensor([half_extent]*3, device=reconstruction[0].get_xyz.device)
         # )
         # reconstruction[0].translate((scene_origin).to(reconstruction[0].get_xyz.device))
-        reconstruction[0].rescale(scene_scale)
-        reconstruction[0].translate(scene_mean)
+        reconstruction[0].rescale(scales[0])
+        reconstruction[0].translate(translations[0])
         xyz = reconstruction[0].get_xyz
         # center = (xyz.max(0).values + xyz.min(0).values) / 2
         # extent = (xyz.max(0).values 
-        for i in range(embedding.shape[0]):
-            scene_id = scene_ids[0][0]
-            obj_id = obj_ids[i]
+        scene_id = scene_ids[0][0]
+        for i in range(len(held_out_idxs[scene_id])):
+            # scene_id = scene_ids[0][0]
+            # obj_id = obj_ids[i]
             intrinsics = intrinsic[scene_id]
-            pose_idx = np.random.randint(0, len(img_poses[scene_id][obj_id]))
-            frame_id = frames[scene_id][obj_id][pose_idx]
-            extrinsics = img_poses[scene_id][obj_id][pose_idx]
+            # pose_idx = np.random.randint(0, len(img_poses[scene_id][obj_id]))
+            # frame_id = frames[scene_id][obj_id][pose_idx]
+            frame_id = held_out_idxs[scene_id][i]   
+            # extrinsics = img_poses[scene_id][obj_id][pose_idx]
+            extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
             image = Image.open(
                 f"{self.cfg.data.root_dir}/scenes/{scene_id}/sequence/frame-{frame_id}.color.jpg"
             )
+            self.logger.info(f"i: {i}, frame_id: {frame_id}")
             image = (
                 torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
             )  # SHape: (3, H, W)
             # mask = masks[scene_id][frame_id]
             # mask = np.where(mask == int(obj_id), 1, 0)  # SHape: (H, W)
             # image_masked = image * mask
-
+            # Reorder quaternion from [x, y, z, w] → [w, x, y, z]
+           
+            # Concatenate with translation
+            
             pose_camera_to_world = np.linalg.inv(pose_quatmat_to_rotmat(extrinsics))
+            # pose_camera_to_world = pose_quatmat_to_rotmat(extrinsics)
             # world_to_camera = np.linalg.inv(pose_camera_to_world)
             world_to_camera = pose_quatmat_to_rotmat(extrinsics)
+            # world_to_camera = extrinsics
             world_view_transform = torch.tensor(world_to_camera, device="cuda", dtype=torch.float32)
             fovx = focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"])
             fovy = focal2fov(intrinsics["intrinsic_mat"][1, 1], intrinsics["height"])
@@ -260,10 +290,11 @@ class Trainer(EpochBasedTrainer):
                 fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
                 znear=0.01,
                 zfar=100.0,
-                # R=pose_camera_to_world[:3, :3].T,
-                # T=pose_camera_to_world[:3, 3],
-                world_view_transform=world_view_transform,
-                full_proj_transform=full_proj_transform,
+                R=pose_camera_to_world[:3, :3].T,
+                T=pose_camera_to_world[:3, 3],
+                # projection_matrix = projection_matrix
+                # world_view_transform=world_view_transform,
+                # full_proj_transform=full_proj_transform,
     
             )
             
@@ -294,25 +325,25 @@ class Trainer(EpochBasedTrainer):
         perceptual_loss = self.perceptual_loss(predicted_images, ground_truth_images)
 
         reconstruction: List[Gaussian]
-        # volume_loss = torch.tensor(
-        #     [recon.get_scaling.prod(dim=-1).mean() for recon in reconstruction]
-        # ).mean()
-        # opacity_loss = torch.tensor(
-        #     [((1 - recon.get_opacity) ** 2).mean() for recon in reconstruction]
-        # ).mean()
+        volume_loss = torch.tensor(
+            [recon.get_scaling.prod(dim=-1).mean() for recon in reconstruction]
+        ).mean()
+        opacity_loss = torch.tensor(
+            [((1 - recon.get_opacity) ** 2).mean() for recon in reconstruction]
+        ).mean()
 
-        # loss = (
-        #     protometric_loss + volume_loss + 0.001 * opacity_loss + perceptual_loss
-        # ) * self.cfg.train.loss.decoder_weight
         loss = (
-            protometric_loss + perceptual_loss
+            protometric_loss + volume_loss + 0.001 * opacity_loss + perceptual_loss
         ) * self.cfg.train.loss.decoder_weight
+        # loss = (
+        #     protometric_loss + perceptual_loss
+        # ) * self.cfg.train.loss.decoder_weight
         
         loss_dict = {
             "loss": loss * 100,
             "l1_loss": protometric_loss,
-            # "volume_loss": volume_loss,
-            # "opacity_loss": opacity_loss,
+            "volume_loss": volume_loss,
+            "opacity_loss": opacity_loss,
             "perceptual_loss": perceptual_loss,
         }
         output_dict = {

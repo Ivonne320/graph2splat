@@ -8,7 +8,7 @@ export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-spl
 
 source .venv/bin/activate
 
-python preprocessing/voxel_anno/voxelise_features.py \
+python preprocessing/voxel_anno/voxelise_features_scene.py \
     --config "preprocessing/voxel_anno/voxel_anno.yaml" \
     --model_dir "$DATA_ROOT_DIR" \
     ${args[@]}

@@ -12,6 +12,7 @@ from plyfile import PlyData
 from scipy.spatial.transform import Rotation as R
 
 from utils import common
+import random
 
 
 def get_original_scan(scan: str) -> str:
@@ -134,6 +135,7 @@ def load_ply_mesh(data_dir, scan_id, label_file_name):
 def load_pose(data_dir, scan_id, frame_id):
     pose_path = osp.join(
         data_dir, "scenes", scan_id, "sequence", "frame-{}.pose.txt".format(frame_id)
+        # data_dir, scan_id, "sequence", "frame-{}.pose.txt".format(frame_id)
     )
     pose = np.genfromtxt(pose_path)
     return pose
@@ -156,9 +158,9 @@ def load_frame_poses(data_dir, scan_id, frame_idxs, type="matrix"):
         if type == "matrix":
             frame_poses[frame_idx] = np.array(frame_pose)
         elif type == "quat_trans":
-            T_pose = np.array(frame_pose)
-            quaternion = R.from_matrix(T_pose[:3, :3]).as_quat()
-            translation = T_pose[:3, 3]
+            T_pose = np.array(frame_pose, dtype=np.float64)
+            quaternion = R.from_matrix(T_pose[:3, :3]).as_quat().astype(np.float64)
+            translation = T_pose[:3, 3].astype(np.float64)
             frame_pose = np.concatenate([quaternion, translation])
         else:
             raise ValueError("Invalid type")
@@ -188,6 +190,33 @@ def load_frame_idxs(data_dir, scan_id, skip=None):
         frame_idxs = [frame_idx for frame_idx in frame_idxs[::skip]]
 
     return frame_idxs
+
+def load_frame_idxs_held_out(data_dir, scan_id, skip=None, heldout_ratio=0.2, seed=42):
+    """
+    Returns:
+        input_frame_idxs: List[str]
+        heldout_frame_idxs: List[str]
+    """
+    frames_paths = glob(osp.join(data_dir, scan_id, "sequence", "*.jpg"))
+    frame_names = [osp.basename(frame_path) for frame_path in frames_paths]
+    frame_idxs = [frame_name.split(".")[0].split("-")[-1] for frame_name in frame_names]
+    frame_idxs = sorted(frame_idxs)
+
+    if skip is not None:
+        frame_idxs = frame_idxs[::skip]
+
+    # Shuffle and split
+    random.seed(seed)
+    frame_idxs_shuffled = frame_idxs[:]
+    random.shuffle(frame_idxs_shuffled)
+
+    num_total = len(frame_idxs_shuffled)
+    num_heldout = int(num_total * heldout_ratio)
+
+    heldout_frame_idxs = sorted(frame_idxs_shuffled[:num_heldout])
+    input_frame_idxs = sorted(frame for frame in frame_idxs if frame not in heldout_frame_idxs)
+
+    return input_frame_idxs, heldout_frame_idxs
 
 
 def load_frame_paths(data_dir, scan_id, skip=None):

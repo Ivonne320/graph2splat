@@ -278,18 +278,19 @@ class EpochBasedTrainer(BaseTrainer):
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             self.save_snapshot("best_snapshot.pth.tar")
-            self.early_stopping_counter = 0  # Reset early stopping counter
+            # self.early_stopping_counter = 0  # Reset early stopping counter
         else:
-            self.early_stopping_counter += 1
+            # self.early_stopping_counter += 1
+            pass
 
         self.logger.critical(message)
         self.write_event("val", summary_dict, self.iteration)
         self.set_train_mode()
 
         # Check for early stopping
-        if self.early_stopping_counter >= self.early_stopping_patience:
-            self.logger.critical("Early stopping triggered.")
-            self.stop_training = True
+        # if self.early_stopping_counter >= self.early_stopping_patience:
+        #     self.logger.critical("Early stopping triggered.")
+        #     self.stop_training = True
 
     def set_train_mode(self):
         self.training = True

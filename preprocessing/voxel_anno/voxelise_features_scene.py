@@ -10,6 +10,8 @@ import open3d as o3d
 import torch
 import torch.nn.functional as F
 import utils3d
+import json
+
 from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
@@ -59,7 +61,8 @@ def _project_to_image(
 
     voxel = voxel * 2.0 - 1.0
     assert voxel.min() >= -1.0 and voxel.max() <= 1.0
-    voxel = voxel * scale + mean
+    # voxel = voxel * scale + mean
+    voxel = voxel * scale[None, :] + mean[None, :]
     uv = utils3d.torch.project_cv(
         voxel.float(), extrinsics.float(), intrinsics.float()
     )[0]
@@ -112,7 +115,9 @@ def _normalize_segmented_mesh(segmented_mesh: o3d.geometry.TriangleMesh):
     vertices = np.asarray(segmented_mesh.vertices)
     mean = vertices.mean(axis=0)
     vertices -= mean
-    scale = np.max(np.abs(vertices))
+    # scale = np.max(np.abs(vertices))
+    scale = np.max(np.abs(vertices), axis=0) 
+    scale[scale == 0] = 1.0
     vertices *= 1.0 / (2 * scale)
     vertices = np.clip(vertices, -0.5 + 1e-6, 0.5 - 1e-6)
     segmented_mesh.vertices = o3d.utility.Vector3dVector(vertices)
@@ -135,7 +140,9 @@ def voxelise_features(
     """
 
     scenes_dir = osp.join(root_dir, "scenes")
-    frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
+    # frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
+    frame_idxs, heldout_idxs = scan3r.load_frame_idxs_held_out(data_dir = scenes_dir, scan_id = scan_id, heldout_ratio=0.2)
+
     extrinsics = scan3r.load_frame_poses(
         data_dir=scenes_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
@@ -152,13 +159,15 @@ def voxelise_features(
     mesh = scan3r.load_ply_mesh(
         data_dir=scenes_dir,
         scan_id=scan_id,
-        label_file_name="labels.instances.align.annotated.v2.ply",
+        label_file_name="labels.instances.annotated.v2.ply",
     )
     annos = scan3r.load_ply_data(
         data_dir=scenes_dir,
         scan_id=scan_id,
-        label_file_name="labels.instances.align.annotated.v2.ply",
+        label_file_name="labels.instances.annotated.v2.ply",
     )["vertex"]["objectId"]
+    object_ids = [int(obj["id"]) for obj in obj_data["objects"]]
+    print("object_ids: ", object_ids)
     
     scene_output_dir = osp.join(args.model_dir, "files", mode, scan_id, "scene_level")
     voxel_path = osp.join(scene_output_dir, "voxel_output_dense.npz")
@@ -218,7 +227,10 @@ def voxelise_features(
         ]
 
         masks = [mask[frame_id] for frame_id in frame_idxs]
-        masks = [np.where(mask > 0, 1, 0) for mask in masks]
+        for i, frame_id in enumerate(frame_idxs[:3]):
+            print(f"Mask {i} (frame {frame_id}) unique labels:", np.unique(masks[i]))
+        # masks = [np.where(mask > 0, 1, 0) for mask in masks]
+        masks =  [np.isin(mask, object_ids).astype(np.uint8) for mask in masks]
         rendered_obj = [
             image * mask[None, :, :] for image, mask in zip(rendered, masks)
         ]
@@ -238,7 +250,8 @@ def voxelise_features(
         projection = _project_to_image(
             torch.Tensor(voxel_grid),
             torch.Tensor(mean),
-            torch.Tensor([scale]),
+            # torch.Tensor([scale]),
+            torch.Tensor(scale),
             torch.from_numpy(np.stack(pose_camera_to_world)),
             torch.from_numpy(intrinsics["intrinsic_mat"]),
         )  # Shape: (Nimages, Npoints, 2)
@@ -289,6 +302,12 @@ def voxelise_features(
                 voxel_grid,
                 output_file=voxel_path,
             )
+        
+        # store held-out indxes
+        held_out_dir = osp.join(scene_output_dir, "heldout_frame_indices.json")
+        with open(held_out_dir, "w") as f:
+            json.dump(heldout_idxs,f)
+            
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         _LOGGER.exception(f"Error processing {scan_id} : {e}")
 

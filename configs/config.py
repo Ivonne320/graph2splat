@@ -242,6 +242,7 @@ class TrainConfig(BaseModel):
     visualize_steps: int = 100
     val_steps: int = 1
     inner_val_steps: int = 2000
+    checkpoint_path: str='pretrained/scene_decoder_snapshot.pth.tar'
 
 
 # Scene Graph Localizer

@@ -153,6 +153,8 @@ seed: 42
 train:
   train_decoder: True
   freeze_encoder: True
+  checkpoint_path : '/home/yihan/graph2splat/pretrained/training_scene_decoder/2025-07-28_02-26-31/snapshots/epoch-1000.pth.tar'
+
   clip_grad: 0.1
   pc_res: 512
   aux_channels: 0
@@ -161,7 +163,7 @@ train:
   use_pretrained: False
   visualize_steps: 1
   val_steps: 1
-  snapshot_steps: 100
+  snapshot_steps: 500
   optim:
     lr: 0.0005
     scheduler: "step"

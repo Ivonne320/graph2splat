@@ -23,6 +23,7 @@ _REPRESENTATION_CONFIG = {
     "lr": {
         "_xyz": 1.0,
         "_features_dc": 1.0,
+        "_features_rest": 1.0,  
         "_scaling": 1.0,
         "_rotation": 0.1,
         "_opacity": 1.0,
@@ -92,6 +93,10 @@ class SLatGaussianDecoder(SparseTransformerBase):
         self.register_buffer("offset_perturbation", perturbation)
 
     def _calc_layout(self) -> None:
+        sh_degree = 2
+        num_sh_rest = (sh_degree + 1)**2 - 1  # exclude DC (1)
+        num_features_rest = num_sh_rest * 3  # RGB per SH coef
+        
         self.layout = {
             "_xyz": {
                 "shape": (self.rep_config["num_gaussians"], 3),
@@ -100,6 +105,10 @@ class SLatGaussianDecoder(SparseTransformerBase):
             "_features_dc": {
                 "shape": (self.rep_config["num_gaussians"], 1, 3),
                 "size": self.rep_config["num_gaussians"] * 3,
+            },
+            "_features_rest": {
+                "shape": (self.rep_config["num_gaussians"], num_sh_rest, 3),
+                "size": self.rep_config["num_gaussians"] * num_features_rest,
             },
             "_scaling": {
                 "shape": (self.rep_config["num_gaussians"], 3),
@@ -133,7 +142,8 @@ class SLatGaussianDecoder(SparseTransformerBase):
         ret = []
         for i in range(x.shape[0]):
             representation = Gaussian(
-                sh_degree=0,
+                sh_degree=2,
+                # sh_degree=0,
                 aabb=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
                 mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
                 scaling_bias=self.rep_config["scaling_bias"],

@@ -22,6 +22,8 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import numpy as np
 import torch
 import torch.optim as optim
+import torch.nn as nn
+import random
 from PIL import Image
 from torchvision.utils import save_image
 
@@ -48,7 +50,7 @@ class Trainer(EpochBasedTrainer):
         # Model Specific params
         self.root_dir = cfg.data.root_dir
         self.cfg = cfg
-        self.cfg.data.preload_slat = False
+        self.cfg.data.preload_slat = True
         self.root_dir = cfg.data.root_dir
         self.modules: list = cfg.autoencoder.encoder.modules
 
@@ -131,6 +133,18 @@ class Trainer(EpochBasedTrainer):
             self.register_scheduler(scheduler)
 
         self.logger.info("Initialisation Complete")
+    def init_sh_weights(self, model):
+        layout = model.decoder.layout  # or decoder_complex
+        weight = model.decoder.out_layer.weight
+        bias = model.decoder.out_layer.bias
+
+        if "_features_rest" not in layout:
+            print("No SH degree > 0, skipping SH weight init")
+            return
+
+        start, end = layout["_features_rest"]["range"]
+        nn.init.normal_(weight[start:end], mean=0.0, std=0.01)
+        nn.init.constant_(bias[start:end], 0.0)
 
     def create_model(self) -> LatentAutoencoder:
         if self.cfg.autoencoder.guidance:
@@ -145,11 +159,27 @@ class Trainer(EpochBasedTrainer):
         else:
             model = LatentAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
 
-        model.load_state_dict(
-            torch.load(
-                "pretrained/slat_pretrained.pth.tar", map_location=self.device
-            )["model"]
-        )
+        # model.load_state_dict(
+        #     torch.load(
+        #         "/home/yihan/graph2splat/pretrained/training_scene_decoder/2025-08-04_04-40-51/snapshots/epoch-1500.pth.tar", map_location=self.device
+        #     )["model"]
+        # )
+        state_dict = torch.load("pretrained/slat_pretrained.pth.tar", map_location=self.device)["model"]
+        encoder_dict = {
+            k.replace("encoder.", ""): v for k, v in state_dict.items() if k.startswith("encoder.")
+        }
+        model.encoder.load_state_dict(encoder_dict, strict=True)
+        decoder_dict = {
+            k.replace("decoder.", ""): v for k, v in state_dict.items() if k.startswith("decoder.")
+        }
+        decoder_dict_filtered = {
+            k: v for k, v in decoder_dict.items()
+            if not k.startswith("out_layer.weight") and not k.startswith("out_layer.bias")
+        }
+        model.decoder.load_state_dict(decoder_dict_filtered, strict=False)
+        self.init_sh_weights(model)
+        model.decoder.convert_to_fp16()
+        model.encoder.convert_to_fp16()
         if self.cfg.train.freeze_encoder:
             assert model is not None and isinstance(model, LatentAutoencoder)
             for param in model.encoder.parameters():
@@ -160,6 +190,7 @@ class Trainer(EpochBasedTrainer):
         self.logger.info(message)
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self.logger.info(f"Number of parameters: {num_params}")
+        
         return model
 
     def freeze_encoder(self) -> None:
@@ -191,34 +222,24 @@ class Trainer(EpochBasedTrainer):
         scales = data_dict["scene_graphs"]["scale_obj_splat"]
         held_out_idxs = data_dict["held_out_idxs"]
         # data_dict["scene_graphs"]["tot_obj_splat"] =  data_dict["scene_graphs"]["tot_obj_splat"][0]
-        with torch.no_grad():
-            embedding = self.model.encode(data_dict)
+        # with torch.no_grad():
+        #     embedding = self.model.encode(data_dict)
         # embedding = self.random_subsample_sparse_tensor(sparse_tensor=embedding)
-        embedding = embedding[0]
-        # embedding = data_dict["scene_graphs"]["tot_obj_splat"]
+        # embedding = embedding[0]
+        embedding = data_dict["scene_graphs"]["tot_obj_splat"]
         # images = visualize_object_embeddings(data_dict=data_dict, embedding=embedding)
         # plt.show(images)
         
         print(embedding.shape)
         print(scene_ids)
-        visualize_slat_alignment(slat_tensor=embedding[0], obj_idx=0, out_dir = "pretrained/training_scene_decoder/debug/vis/")
-        # visualize_slat_alignment(slat_tensor=embedding[4], obj_idx=4, out_dir = "pretrained/training_scene_decoder/debug/vis/")
-        # #  preload slats
-        # if not self.cfg.data.preload_slat:
-        #     embedding = self.model.encode(data_dict)
-        # else:
-        #     embedding = data_dict["scene_graphs"]["tot_obj_splat"]
-        
-        # scene_splat, voxel_size, scene_origin = revoxelize_to_fixed_scene_slat(
-        
-        # scene_splat, voxel_size, scene_origin, bbox_extent, bbox_min = revoxelize_to_fixed_scene_slat_with_aggregation(  
-        # scene_splat, scene_mean, scene_scale = revoxelize_scene_via_normalized_coords(  
-        #     splat=embedding,
-        #     means=translations,
-        #     scales=scales[:, None].repeat(1, 3)  # [B, 3]
-        # )
-        scene_splat = embedding
-        visualize_slat_alignment(slat_tensor=scene_splat, obj_idx=3, out_dir = "pretrained/training_scene_decoder/debug/vis/")
+       
+        scene_splat, scene_mean, scene_scale = revoxelize_scene_via_normalized_coords(  
+            splat=embedding,
+            means=translations,
+            scales=scales[:, None].repeat(1, 3)  # [B, 3]
+        )
+        # scene_splat = embedding
+        # visualize_slat_alignment(slat_tensor=scene_splat, obj_idx=3, out_dir = "pretrained/training_scene_decoder/debug/vis/")
         reconstruction = self.model.decode(scene_splat)
         # reconstruction = self.model.decode(embedding)
         predicted_images = []
@@ -231,31 +252,18 @@ class Trainer(EpochBasedTrainer):
         reconstruction[0].translate(
                 -torch.tensor([1, 1, 1], device=reconstruction[0].get_xyz.device)
             )
-        # xyz = reconstruction[0].get_xyz
-        # center = (xyz.min(dim=0).values + xyz.max(dim=0).values) / 2
-        # extent = (xyz.max(dim=0).values - xyz.min(dim=0).values) / 2
-
-        # # Recenter and rescale to roughly [-0.5, 0.5]^3
-        # reconstruction[0].translate(-center)
-        # reconstruction[0].rescale(1.0 / extent)
-        # half_extent = voxel_size * (32)
-        # reconstruction[0].rescale(
-        #     torch.tensor([half_extent]*3, device=reconstruction[0].get_xyz.device)
-        # )
-        # reconstruction[0].translate((scene_origin).to(reconstruction[0].get_xyz.device))
-        reconstruction[0].rescale(scales[0])
-        reconstruction[0].translate(translations[0])
-        xyz = reconstruction[0].get_xyz
-        # center = (xyz.max(0).values + xyz.min(0).values) / 2
-        # extent = (xyz.max(0).values 
+        reconstruction[0].rescale(scene_scale)
+        reconstruction[0].translate(scene_mean)
+    
         scene_id = scene_ids[0][0]
-        for i in range(len(held_out_idxs[scene_id])):
+        random_frame_ids = random.sample(held_out_idxs[scene_id], 6)
+        for i in range(len(random_frame_ids)):
             # scene_id = scene_ids[0][0]
             # obj_id = obj_ids[i]
             intrinsics = intrinsic[scene_id]
             # pose_idx = np.random.randint(0, len(img_poses[scene_id][obj_id]))
             # frame_id = frames[scene_id][obj_id][pose_idx]
-            frame_id = held_out_idxs[scene_id][i]   
+            frame_id =random_frame_ids[i]   
             # extrinsics = img_poses[scene_id][obj_id][pose_idx]
             extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
             image = Image.open(
@@ -301,7 +309,7 @@ class Trainer(EpochBasedTrainer):
             pipe_cfg = Namespace(
                 debug=False,
                 compute_cov3D_python=False,
-                convert_SHs_python=False
+                convert_SHs_python=True
             )
 
             rendered_image = render(
@@ -349,8 +357,8 @@ class Trainer(EpochBasedTrainer):
         output_dict = {
             "reconstruction": reconstruction,
             "gt": ground_truths,
-            "predicted_images": predicted_images,
-            "ground_truth_images": ground_truth_images,
+            "predicted_images": predicted_images.detach().cpu(),
+            "ground_truth_images": ground_truth_images.detach().cpu(),
             "embeddings": embedding,
         }
         return output_dict, loss_dict

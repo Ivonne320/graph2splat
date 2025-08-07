@@ -141,6 +141,9 @@ def sparse_windowed_scaled_dot_product_self_attention(
         qkv_feats = qkv_feats.reshape(B, N, 3, H, C)
         if ATTN == "xformers":
             q, k, v = qkv_feats.unbind(dim=2)  # [B, N, H, C]
+            q = q.float()
+            k = k.float()
+            v = v.float()
             out = xops.memory_efficient_attention(q, k, v)  # [B, N, H, C]
         elif ATTN == "flash_attn":
             out = flash_attn.flash_attn_qkvpacked_func(qkv_feats)  # [B, N, H, C]

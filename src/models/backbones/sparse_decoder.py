@@ -93,7 +93,7 @@ class SLatGaussianDecoder(SparseTransformerBase):
         self.register_buffer("offset_perturbation", perturbation)
 
     def _calc_layout(self) -> None:
-        sh_degree = 2
+        sh_degree = 0
         num_sh_rest = (sh_degree + 1)**2 - 1  # exclude DC (1)
         num_features_rest = num_sh_rest * 3  # RGB per SH coef
         
@@ -106,10 +106,10 @@ class SLatGaussianDecoder(SparseTransformerBase):
                 "shape": (self.rep_config["num_gaussians"], 1, 3),
                 "size": self.rep_config["num_gaussians"] * 3,
             },
-            "_features_rest": {
-                "shape": (self.rep_config["num_gaussians"], num_sh_rest, 3),
-                "size": self.rep_config["num_gaussians"] * num_features_rest,
-            },
+            # "_features_rest": {
+            #     "shape": (self.rep_config["num_gaussians"], num_sh_rest, 3),
+            #     "size": self.rep_config["num_gaussians"] * num_features_rest,
+            # },
             "_scaling": {
                 "shape": (self.rep_config["num_gaussians"], 3),
                 "size": self.rep_config["num_gaussians"] * 3,
@@ -142,10 +142,11 @@ class SLatGaussianDecoder(SparseTransformerBase):
         ret = []
         for i in range(x.shape[0]):
             representation = Gaussian(
-                sh_degree=2,
-                # sh_degree=0,
+                # sh_degree=1,
+                sh_degree=0,
                 aabb=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-                mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
+                # mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
+                mininum_kernel_size=0.002,
                 scaling_bias=self.rep_config["scaling_bias"],
                 opacity_bias=self.rep_config["opacity_bias"],
                 scaling_activation=self.rep_config["scaling_activation"],
@@ -160,6 +161,7 @@ class SLatGaussianDecoder(SparseTransformerBase):
                     offset = offset * self.rep_config["lr"][k]
                     if self.rep_config["perturb_offset"]:
                         offset = offset + self.offset_perturbation
+                    offset = torch.nan_to_num(offset, nan=0.0, posinf=1e3, neginf=-1e3)
                     offset = (
                         torch.tanh(offset)
                         / self.resolution
@@ -175,6 +177,18 @@ class SLatGaussianDecoder(SparseTransformerBase):
                         .flatten(0, 1)
                     )
                     feats = feats * self.rep_config["lr"][k]
+                    if k == "_opacity":
+                        # Clamp or squash to valid range to avoid NaNs in loss
+                        # feats = torch.sigmoid(feats)  # in (0,1)
+                        feats = torch.clamp(feats, -10, 10)
+                    elif k == "_scaling":
+                        # Prevent negative or zero scaling (could break splatting)
+                        feats = torch.clamp(feats, min=-10, max=5)
+                    elif k == "_rotation":
+                        feats = feats
+
+                    # Optional NaN/Inf guard for all feats
+                    feats = torch.nan_to_num(feats, nan=0.0, posinf=1e3, neginf=-1e3)
                     setattr(representation, k, feats)
             ret.append(representation)
         return ret

@@ -93,36 +93,64 @@ class SLatGaussianDecoder(SparseTransformerBase):
         self.register_buffer("offset_perturbation", perturbation)
 
     def _calc_layout(self) -> None:
-        sh_degree = 0
+        sh_degree = self.rep_config['sh_degree']
         num_sh_rest = (sh_degree + 1)**2 - 1  # exclude DC (1)
         num_features_rest = num_sh_rest * 3  # RGB per SH coef
-        
-        self.layout = {
-            "_xyz": {
-                "shape": (self.rep_config["num_gaussians"], 3),
-                "size": self.rep_config["num_gaussians"] * 3,
-            },
-            "_features_dc": {
-                "shape": (self.rep_config["num_gaussians"], 1, 3),
-                "size": self.rep_config["num_gaussians"] * 3,
-            },
-            # "_features_rest": {
-            #     "shape": (self.rep_config["num_gaussians"], num_sh_rest, 3),
-            #     "size": self.rep_config["num_gaussians"] * num_features_rest,
-            # },
-            "_scaling": {
-                "shape": (self.rep_config["num_gaussians"], 3),
-                "size": self.rep_config["num_gaussians"] * 3,
-            },
-            "_rotation": {
-                "shape": (self.rep_config["num_gaussians"], 4),
-                "size": self.rep_config["num_gaussians"] * 4,
-            },
-            "_opacity": {
-                "shape": (self.rep_config["num_gaussians"], 1),
-                "size": self.rep_config["num_gaussians"],
-            },
-        }
+        if sh_degree == 0:
+            self.layout = {
+                "_xyz": {
+                    "shape": (self.rep_config["num_gaussians"], 3),
+                    "size": self.rep_config["num_gaussians"] * 3,
+                },
+                "_features_dc": {
+                    "shape": (self.rep_config["num_gaussians"], 1, 3),
+                    "size": self.rep_config["num_gaussians"] * 3,
+                },
+                # "_features_rest": {
+                #     "shape": (self.rep_config["num_gaussians"], num_sh_rest, 3),
+                #     "size": self.rep_config["num_gaussians"] * num_features_rest,
+                # },
+                "_scaling": {
+                    "shape": (self.rep_config["num_gaussians"], 3),
+                    "size": self.rep_config["num_gaussians"] * 3,
+                },
+                "_rotation": {
+                    "shape": (self.rep_config["num_gaussians"], 4),
+                    "size": self.rep_config["num_gaussians"] * 4,
+                },
+                "_opacity": {
+                    "shape": (self.rep_config["num_gaussians"], 1),
+                    "size": self.rep_config["num_gaussians"],
+                },
+            }
+        else:
+            self.layout = {
+                "_xyz": {
+                    "shape": (self.rep_config["num_gaussians"], 3),
+                    "size": self.rep_config["num_gaussians"] * 3,
+                },
+                "_features_dc": {
+                    "shape": (self.rep_config["num_gaussians"], 1, 3),
+                    "size": self.rep_config["num_gaussians"] * 3,
+                },
+                "_features_rest": {
+                    "shape": (self.rep_config["num_gaussians"], num_sh_rest, 3),
+                    "size": self.rep_config["num_gaussians"] * num_features_rest,
+                },
+                "_scaling": {
+                    "shape": (self.rep_config["num_gaussians"], 3),
+                    "size": self.rep_config["num_gaussians"] * 3,
+                },
+                "_rotation": {
+                    "shape": (self.rep_config["num_gaussians"], 4),
+                    "size": self.rep_config["num_gaussians"] * 4,
+                },
+                "_opacity": {
+                    "shape": (self.rep_config["num_gaussians"], 1),
+                    "size": self.rep_config["num_gaussians"],
+                },
+            }
+            
         start = 0
         for k, v in self.layout.items():
             v["range"] = (start, start + v["size"])
@@ -143,10 +171,10 @@ class SLatGaussianDecoder(SparseTransformerBase):
         for i in range(x.shape[0]):
             representation = Gaussian(
                 # sh_degree=1,
-                sh_degree=0,
+                sh_degree=self.rep_config["sh_degree"],
                 aabb=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-                # mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
-                mininum_kernel_size=0.002,
+                mininum_kernel_size=self.rep_config["3d_filter_kernel_size"],
+                # mininum_kernel_size=0.002,
                 scaling_bias=self.rep_config["scaling_bias"],
                 opacity_bias=self.rep_config["opacity_bias"],
                 scaling_activation=self.rep_config["scaling_activation"],

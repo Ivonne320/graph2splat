@@ -57,7 +57,12 @@ class LatentAutoencoder(nn.Module):
             with open(f"{SCRATCH}/TRELLIS-image-large/{path}.json", "r") as f:
                 configs = json.load(f)
             state_dict = load_file(f"{SCRATCH}/TRELLIS-image-large/{path}.safetensors")
-            configs["args"]["representation_config"]["lr"]["_features_rest"] = 1.0
+            configs["args"]["representation_config"]["sh_degree"] =  self.cfg.sh_degree
+            if self.cfg.sh_degree > 0:
+                configs["args"]["representation_config"]["lr"]["_features_rest"] = 1.0
+            configs["args"]["representation_config"]["num_gaussians"]=self.cfg.num_gaussians
+            
+            
             net = SLatGaussianDecoder(**configs["args"])
             # net.load_state_dict(state_dict)
 

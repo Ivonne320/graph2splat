@@ -173,6 +173,8 @@ class DecoderConfig(BaseModel):
 
 class AutoencoderConfig(BaseModel):
     guidance: bool = False
+    sh_degree: int = 0
+    num_gaussians: int = 32
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     decoder: DecoderConfig = Field(default_factory=DecoderConfig)
 

@@ -24,20 +24,55 @@ from utils import visualisation as vis
 _LOGGER = logging.getLogger(__name__)
 
 
-def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
-    images = images.reshape(-1, 3, images.shape[-2], images.shape[-1]).cpu()
-    inputs = transform(images).cuda()
-    outputs = model(inputs, is_training=True)
+# def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
+#     images = images.reshape(-1, 3, images.shape[-2], images.shape[-1]).cpu()
+#     inputs = transform(images).cuda()
+#     outputs = model(inputs, is_training=True)
 
-    n_patch = 518 // 14
-    bs = images.shape[0]
-    patch_embeddings = (
-        outputs["x_prenorm"][:, model.num_register_tokens + 1 :]
-        .permute(0, 2, 1)
-        .reshape(bs, 1024, n_patch, n_patch)
-    )
-    return patch_embeddings
+#     n_patch = 518 // 14
+#     bs = images.shape[0]
+#     patch_embeddings = (
+#         outputs["x_prenorm"][:, model.num_register_tokens + 1 :]
+#         .permute(0, 2, 1)
+#         .reshape(bs, 1024, n_patch, n_patch)
+#     )
+#     return patch_embeddings
 
+@torch.no_grad()
+def _get_dino_embedding(images: torch.Tensor):
+    """
+    images: (B,3,H,W) in [0,1]
+    returns:
+      emb:   (B, C, H_p, W_p)
+      sizes: (H_in, W_in, H_p, W_p)
+    """
+    # preprocess with your transform
+    imgs = images.reshape(-1, 3, images.shape[-2], images.shape[-1]).cpu()
+    inp  = transform(imgs).cuda()         # (B,3,H_in,W_in)
+
+    model.eval()
+    out = model(inp, is_training=True)    # dict with patch tokens
+
+    # 1) take patch tokens directly (B, N, C)
+    if "x_norm_patchtokens" not in out:
+        # fallback if needed
+        reg = getattr(model, "num_register_tokens", 0)
+        tok = out["x_prenorm"][:, 1 + reg : ]         # (B, N, C)
+    else:
+        tok = out["x_norm_patchtokens"]               # (B, N, C)
+
+    # 2) compute patch grid from actual input + patch size
+    H_in, W_in = int(inp.shape[-2]), int(inp.shape[-1])
+    p = getattr(model, "patch_size", None)
+    if p is None and hasattr(model, "patch_embed") and hasattr(model.patch_embed, "patch_size"):
+        p = model.patch_embed.patch_size
+    p = int(p[0] if isinstance(p, (tuple, list)) else p)
+    H_p, W_p = H_in // p, W_in // p
+    assert tok.shape[1] == H_p * W_p, f"N={tok.shape[1]} != {H_p*W_p} (H_in={H_in}, W_in={W_in}, p={p})"
+
+    # 3) (B,N,C) -> (B,C,H_p,W_p)
+    emb = tok.permute(0, 2, 1).contiguous().view(tok.size(0), tok.size(2), H_p, W_p)
+    return emb, (H_in, W_in, H_p, W_p)
 
 def _save_featured_voxel(
     voxel: torch.Tensor, output_file: str = "voxel_output_dense.npz"
@@ -140,11 +175,11 @@ def voxelise_features(
     """
 
     scenes_dir = osp.join(root_dir, "scenes")
-    # frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
-    frame_idxs, heldout_idxs = scan3r.load_frame_idxs_held_out(data_dir = scenes_dir, scan_id = scan_id, heldout_ratio=0.2)
+    frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
+    # frame_idxs, heldout_idxs = scan3r.load_frame_idxs_held_out(data_dir = scenes_dir, scan_id = scan_id, heldout_ratio=0.2)
 
     extrinsics = scan3r.load_frame_poses(
-        data_dir=scenes_dir, scan_id=scan_id, frame_idxs=frame_idxs
+        data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
     mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
@@ -266,6 +301,7 @@ def voxelise_features(
         patch_embeddings = _get_dino_embedding(
             rendered_obj
         )  # Shape: (Nimages, 1024, 64, 64)
+        patch_embeddings, (H_in, W_in, H_p, W_p) = _get_dino_embedding(rendered_obj.unsqueeze(0).cuda())
 
         # STEP 9: Match the embeddings to the projection
         patchtokens = (
@@ -303,10 +339,10 @@ def voxelise_features(
                 output_file=voxel_path,
             )
         
-        # store held-out indxes
-        held_out_dir = osp.join(scene_output_dir, "heldout_frame_indices.json")
-        with open(held_out_dir, "w") as f:
-            json.dump(heldout_idxs,f)
+        # # store held-out indxes
+        # held_out_dir = osp.join(scene_output_dir, "heldout_frame_indices.json")
+        # with open(held_out_dir, "w") as f:
+        #     json.dump(heldout_idxs,f)
             
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         _LOGGER.exception(f"Error processing {scan_id} : {e}")
@@ -361,7 +397,7 @@ def process_data(
     #     for scan_id in subscan_ids_generated
     #     for subscan_id in subscan_ids_generated[scan_id]
     # ]
-    all_subscan_ids = ["fcf66d8a-622d-291c-8429-0e1109c6bb26", "fcf66d9e-622d-291c-84c2-bb23dfe31327", "fcf66d88-622d-291c-871f-699b2d063630"]
+    all_subscan_ids = ["fcf66d88-622d-291c-871f-699b2d063630"]
 
     for subscan_id in tqdm(all_subscan_ids):
         obj_data = next(
@@ -403,7 +439,7 @@ def parse_args() -> Tuple[Namespace, list]:
         type=str,
     )
     parser.add_argument("--model_dir", type=str, default="")
-    parser.add_argument("--model", type=str, default="dinov2_vitl14_reg")
+    parser.add_argument("--model", type=str, default="dinov3_vitl16")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--vis_dir", type=str, default="vis")
     parser.add_argument("--dry_run", action="store_true")
@@ -420,7 +456,11 @@ if __name__ == "__main__":
     cfg = update_configs(args.config, unknown, do_ensure_dir=False)
     root_dir = cfg.data.root_dir
 
-    model = torch.hub.load("facebookresearch/dinov2", args.model)
+    model = torch.hub.load("/home/yihan/.cache/torch/hub/facebookresearch_dinov3_main", args.model, source='local', pretrained=False)
+    ckpt_path = "/home/yihan/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    state_dict = ckpt.get("model", ckpt)
+    model.load_state_dict(state_dict, strict=False)
     model.eval().cuda()
     transform = transforms.Compose(
         [

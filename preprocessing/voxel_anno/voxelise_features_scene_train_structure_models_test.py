@@ -428,11 +428,11 @@ def voxelise_features(
             np.savez(mean_scale_path, mean=mean, scale=scale)
             _LOGGER.info(f"Saved mean and scale to {mean_scale_path}")
 
-        if (
-            os.path.exists(voxel_path) and "arr_0" in np.load(voxel_path)
-        ) and not args.override:
-            _LOGGER.info(f"Skipping {scan_id}")
-            return
+        # if (
+        #     os.path.exists(voxel_path) and "arr_0" in np.load(voxel_path)
+        # ) and not args.override:
+        #     _LOGGER.info(f"Skipping {scan_id}")
+        #     return
 
         # STEP 5: Render the object
         pose_camera_to_world = [
@@ -511,7 +511,7 @@ def voxelise_features(
         T_wc_ref = np.linalg.inv(extrinsics[ref_fid]).astype(np.float32) 
         # 1) Lift to world points from ref (same unprojection you use in inference)
         Wp = unproject_frame_to_world(ref_fid, extrinsics, K_rgb, K_depth, root_dir, scan_id)
-        mean_pad, scale_pad, pts_normed = normalize_points_with_padding(Wp, G=G, pad_ratio=1.5, isotropic=False)
+        mean_pad, scale_pad, pts_normed = normalize_points_with_padding(Wp, G=G, pad_ratio=1, isotropic=True)
         vox_idx_raw, _ = _voxelize_points_normed(pts_normed, grid_size=G)      # (M,3)
         vox_idx_seed = _dilate_voxels_from_idx(vox_idx_raw, grid_size=G)       # (Ms0,3)
         centers_normed = (vox_idx_seed.astype(np.float32) + 0.5) / G - 0.5     # [-0.5,0.5]
@@ -562,7 +562,7 @@ def voxelise_features(
             "seed_idx": seed_idx_pcd.astype(np.int32),              # conditioning on PCD grid
             "feats": feats.astype(np.float32),                      # 1:1 with seeds
             "frame_id_used": np.array(ref_fid),
-            "pad_meta": np.array([-1, 1.5], dtype=np.float32),
+            "pad_meta": np.array([-1, 1], dtype=np.float32),
             }
 
         # Filename convention consistent with the rest of your code:

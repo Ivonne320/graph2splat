@@ -183,27 +183,35 @@ class SparseStructureEncoder(nn.Module):
         self.blocks.apply(convert_module_to_f32)
         self.middle_block.apply(convert_module_to_f32)
 
-    def forward(self, x: torch.Tensor, sample_posterior: bool = False, return_raw: bool = False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sample_posterior: bool = False, return_raw: bool = False, return_feat: bool = False) -> torch.Tensor:
         h = self.input_layer(x)
         h = h.type(self.dtype)
 
         for block in self.blocks:
             h = block(h)
-        h = self.middle_block(h)
+        # h = self.middle_block(h)
+        h_mid = self.middle_block(h)
+        h_out = h_mid.type(x.dtype)
+        h_out = self.out_layer(h_out) 
 
-        h = h.type(x.dtype)
-        h = self.out_layer(h)
+        # h = h.type(x.dtype)
+        # h = self.out_layer(h)
 
-        mean, logvar = h.chunk(2, dim=1)
+        # mean, logvar = h.chunk(2, dim=1)
+        mean, logvar = h_out.chunk(2, dim=1)
 
         if sample_posterior:
             std = torch.exp(0.5 * logvar)
             z = mean + std * torch.randn_like(std)
         else:
             z = mean
-            
+        if return_raw and return_feat:
+            return z, mean, logvar, h_mid
         if return_raw:
             return z, mean, logvar
+        
+        if return_feat:
+            return z, h_mid
         return z
         
 

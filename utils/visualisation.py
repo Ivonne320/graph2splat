@@ -4,6 +4,7 @@ import os.path as osp
 import pickle
 import random
 import sys
+import os
 from collections import Counter
 from copy import deepcopy
 from nis import cat
@@ -1067,3 +1068,76 @@ class RetrievalStatistics:
         ax.legend(loc="upper left", fontsize=font_size)
         fig.tight_layout()
         fig.savefig(fig_path, bbox_inches="tight")
+        
+def vox_idx_to_centers_normed(vox_idx: torch.Tensor, G: int) -> np.ndarray:
+    """
+    vox_idx: (M,3) long [i,j,k] in [0,G)
+    returns centers in [-0.5,0.5]^3 as float32
+    """
+    v = vox_idx.detach().cpu().long()
+    c = (v.float() + 0.5) / float(G) - 0.5
+    return c.numpy().astype(np.float32)
+
+def save_vox_as_ply(vox_idx: torch.Tensor, G: int, path: str, rgb=(0,255,0)):
+    """
+    Minimal PLY writer: points are voxel centers, colored solid rgb.
+    """
+    pts = vox_idx_to_centers_normed(vox_idx, G)  # (M,3)
+    if pts.shape[0] == 0:
+        # write empty ply
+        with open(path, "w") as f:
+            f.write("ply\nformat ascii 1.0\nelement vertex 0\nproperty float x\nproperty float y\nproperty float z\nend_header\n")
+        return
+    rgb = np.asarray(rgb, dtype=np.uint8)[None, :].repeat(pts.shape[0], axis=0)
+    os.makedirs(osp.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {pts.shape[0]}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        for p, c in zip(pts, rgb):
+            f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f} {int(c[0])} {int(c[1])} {int(c[2])}\n")
+
+def occ_to_indices(occ_1g: torch.Tensor, thr: float) -> torch.Tensor:
+    """
+    occ_1g: (1,G,G,G) or (B,1,G,G,G)
+    returns (M,3) long tensor of active voxels (for first item if batched)
+    """
+    if occ_1g.dim() == 5:
+        grid = occ_1g[0,0]
+    elif occ_1g.dim() == 4:
+        grid = occ_1g[0]
+    else:
+        grid = occ_1g
+    return (grid > thr).nonzero(as_tuple=False).long()
+
+# ---------- 2D slice mosaics for TB/PNG ----------
+
+def slice_mosaic(volume: torch.Tensor, max_slices=6):
+    """
+    volume: (G,G,G) float in [0,1] or logits (we'll sigmoid)
+    Returns a CHW (1,H,W) image with k slices tiled horizontally.
+    """
+    if volume.dtype.is_floating_point:
+        vol = torch.clamp(volume.sigmoid() if volume.max() > 1.0 or volume.min() < 0.0 else volume, 0, 1)
+    else:
+        vol = volume.float()
+    G = vol.shape[0]
+    idx = torch.linspace(0, G-1, steps=min(max_slices, G)).round().long()
+    strips = []
+    for k in idx:
+        # take XY at fixed Z=k
+        sl = vol[:, :, k]  # (G,G)
+        strips.append(sl.unsqueeze(0))  # (1,G,G)
+    grid = torch.cat(strips, dim=-1)  # (1,G, k*G)
+    return grid  # (1, H, W)
+
+def side_by_side(gt_grid: torch.Tensor, pr_grid: torch.Tensor, max_slices=6):
+    """
+    gt_grid, pr_grid: (G,G,G) floats or logits
+    Returns (2, H, W): first row GT, second row PR
+    """
+    g = slice_mosaic(gt_grid, max_slices=max_slices)
+    p = slice_mosaic(pr_grid, max_slices=max_slices)
+    return torch.cat([g, p], dim=0)

@@ -38,7 +38,7 @@ def _load_frame_poses(
     }
 
 
-class Scan3RSceneBatchDataset(data.Dataset):
+class Scan3RSceneBatchSingleDataset(data.Dataset):
     def __init__(self, cfg: Config, split: str):
         self.cfg = cfg
 
@@ -61,7 +61,8 @@ class Scan3RSceneBatchDataset(data.Dataset):
         self.scans_files_dir = osp.join(self.scans_dir, "files")
         self.scenes_dir = osp.join(cfg.data.root_dir, "scenes")
         self.scans_files_dir_mode = osp.join(self.scans_files_dir, "orig")
-        self.use_student_structure = getattr(cfg.data, "use_student_structure", True)
+        # self.use_student_structure = getattr(cfg.data, "use_student_structure", True)
+        self.use_student_structure = True
         self.student_structure_format = getattr(
             cfg.data, "student_structure_format", "sparse"
         )
@@ -98,7 +99,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
             cfg.data, "student_pack_feat_dim", enc_feat_dim
         )
         self.single_view_supervision_frames = getattr(
-            cfg.data, "single_view_supervision_frames",0
+            cfg.data, "single_view_supervision_frames",1
         )
         self.cfg.data.preload_slat = False
 
@@ -266,9 +267,9 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 missing = [p]
             else:
                 p1 = os.path.join(self.scans_files_dir, "gs_annotations", scan_id,
-                                "scene_level_dinov2_256_no_dilation_clean", f"voxel_output{self.suffix}.npz")
+                                "scene_level_dinov3_128_reso_align", f"voxel_output{self.suffix}.npz")
                 p2 = os.path.join(self.scans_files_dir, "gs_annotations", scan_id,
-                                "scene_level_dinov2_256_no_dilation_clean", f"mean_scale{self.suffix}.npz")
+                                "scene_level_dinov3_128_reso_align", f"mean_scale{self.suffix}.npz")
                 ok = os.path.exists(p1) and os.path.exists(p2)
                 missing = [p for p in (p1, p2) if not os.path.exists(p)]
 
@@ -388,7 +389,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                         len(filtered), len(self.scan_ids)
                     )
 
-                    self.scan_ids = filtered[:10]
+                    self.scan_ids = filtered[:1000]
                     # self.scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327']
                     _LOGGER.info(f"scan_ids:{self.scan_ids}")
                     # self.scan_ids = filtered[:700]
@@ -407,10 +408,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
             # with open(txt_path, "r") as f:
             #     self.scan_ids = [line.strip() for line in f if line.strip()]
             self._filter_missing_splats()
-            self.scan_ids = self.scan_ids[:100]
-            # idx = [22, 38, 34, 31, 63, 4, 67, 17, 97, 2 ]
-            # idx = [20, 75, 69, 35, 0, 7, 42, 28, 96, 40]
-            # self.scan_ids = [self.scan_ids[i] for i in idx]
+            self.scan_ids = self.scan_ids[:10]
             # self.scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327','02b33dfb-be2b-2d54-92d2-cd012b2b3c40','02b33dfd-be2b-2d54-91d2-55454852009e','fcf66d88-622d-291c-871f-699b2d063630']
             _LOGGER.info(f"scan_ids: {self.scan_ids}")
 
@@ -547,7 +545,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 "gs_annotations",
                 scan_id,
                 # str(obj_id),
-                "scene_level_dinov2_256_no_dilation_clean",
+                "scene_level_dinov3_128_reso_align",
                 f"voxel_output{self.suffix}.npz",
             )
             try:
@@ -576,7 +574,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 "gs_annotations",
                 scan_id,
                 # str(obj_id),
-                "scene_level_dinov2_256_no_dilation_clean",
+                "scene_level_dinov3_128_reso_align",
                 f"mean_scale{self.suffix}.npz",
             )
             if os.path.exists(mean_scale_path):
@@ -807,17 +805,9 @@ class Scan3RSceneBatchDataset(data.Dataset):
         self, scan_id: str, frame_idx: Union[str, int]
     ) -> dict:
         pack = self._load_student_pack_npz(scan_id, frame_idx)
-        gt_idx_np = pack.get("vox_idx_gt_occ", np.zeros((0, 3), np.int32)).astype(
-            np.int32
-        )
-        G = int(pack.get("G", 128))
-        _LOGGER.info(f"G:{G}")
-        if gt_idx_np.size == 0:
-            coords_sparse = torch.zeros((1, 3), dtype=torch.int32)
-            coords_dense = torch.zeros((0, 3), dtype=torch.int32)
-        else:
-            coords_sparse = torch.from_numpy(gt_idx_np).int()
-            coords_dense = coords_sparse.clone()
+        gt_idx_np = pack.get("vox_idx_gt_occ", np.zeros((0, 3), np.int32)).astype(np.int32)
+        G = int(pack.get("G", 64))
+        coords_dense = torch.from_numpy(gt_idx_np).int() if gt_idx_np.size > 0 else torch.zeros((0,3), dtype=torch.int32)
 
         feat_dim = self.student_pack_feat_dim
         sample_grid_np = pack.get("sample_grid")
@@ -835,9 +825,6 @@ class Scan3RSceneBatchDataset(data.Dataset):
         seed_idx_np = pack.get("seed_idx", np.zeros((0, 3), np.int32)).astype(
             np.int32
         )
-        feats_tensor = torch.zeros(
-            (coords_sparse.shape[0], feat_dim), dtype=torch.float32
-        )
         seed_idx_t = torch.zeros((0, 3), dtype=torch.int32)
         feats_seed_t = torch.zeros((0, feat_dim), dtype=torch.float32)
 
@@ -847,7 +834,8 @@ class Scan3RSceneBatchDataset(data.Dataset):
         scale_seed_val = float(pack.get("seed_box_init_scale", 1.0))
         scale_seed_tensor = torch.tensor(scale_seed_val, dtype=torch.float32).view(1, 1)
 
-        if coords_dense.shape[0] > 0 and feats_np.size > 0 and seed_idx_np.size > 0:
+        # if coords_dense.shape[0] > 0 and feats_np.size > 0 and seed_idx_np.size > 0:
+        if feats_np.size > 0 and seed_idx_np.size > 0:
             mean_gt = torch.from_numpy(
                 pack.get("mean_gt", np.zeros(3, np.float32)).astype(np.float32)
             )
@@ -878,16 +866,12 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 b=0,
                 G=G,
             )
-            feats_tensor = self._scatter_seed_feats_to_gt(
-                G,
-                coords_sparse.long(),
-                idx_dst.long(),
-                feats_seed_t,
-                feat_dim,
-            )
+            
             seed_idx_t = idx_dst.int()
         else:
             seed_idx_t = torch.zeros((0, 3), dtype=torch.int32)
+        coords_sparse = seed_idx_t.clone()
+        feats_tensor = feats_seed_t.clone()   # features per seed voxel
 
         if coords_sparse.shape[0] == 0:
             coords_sparse = torch.zeros((1, 3), dtype=torch.int32)
@@ -1220,34 +1204,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
             sampled_scan = random.sample(candidate_scans, 1)[0]
             return sampled_scan
 
-    # def generate_data_items(self) -> list:
-    #     data_items = []
-    #     for scan_id in self.scan_ids:
-    #         image_paths = self.image_paths[scan_id]
-    #         i = 0
-    #         for frame_idx in image_paths:
-    #             if self.split != "test" and i % 5 != 0:
-    #                 i += 1
-    #                 continue
-    #             i += 1
-    #             data_item_dict = {}
-    #             if self.use_2D_feature:
-    #                 if self.preload_2D_feature:
-    #                     data_item_dict["patch_features"] = self.patch_features[scan_id][
-    #                         frame_idx
-    #                     ]
-    #                 else:
-    #                     data_item_dict[
-    #                         "patch_features_path"
-    #                     ] = self.patch_features_paths[scan_id]
-    #             else:
-    #                 data_item_dict["img_path"] = image_paths[frame_idx]
-    #             data_item_dict["frame_idx"] = frame_idx
-    #             data_item_dict["scan_id"] = scan_id
-    #             data_items.append(data_item_dict)
-    #             if self.cfg.task == "reconstruction":
-    #                 break
-    #     return data_items
+    
 
     def generate_data_items(self) -> list:
         data_items = []
@@ -1263,10 +1220,17 @@ class Scan3RSceneBatchDataset(data.Dataset):
                     continue
             # i = 0                        # <- remove
             for frame_idx in frame_indices:
-                # if self.split != "test" and i % 5 != 0:
-                #     i += 1
-                #     continue
-                # i += 1
+                if self.use_student_structure:
+                    # only keep frames that actually have a pack
+                    fid = str(frame_idx).zfill(6)
+                    subdir = self.student_pack_dir_map.get(
+                        scan_id,
+                        self.student_pack_subdirs[0] if self.student_pack_subdirs else "",
+                    )
+                    base = osp.join(self.student_pack_root, scan_id, subdir)
+                    pack_path = osp.join(base, f"student_pack_aligned_{fid}.npz")
+                    if not osp.isfile(pack_path):
+                        continue
 
                 data_item_dict = {}
                 if self.use_2D_feature:
@@ -1865,7 +1829,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
         data_dict["batch_size"] = len(batch)   # slightly safer
         scene_batch_mode = getattr(self.cfg.train, "scene_batch_mode", None)
         # group_by_scene = scene_batch_mode == "single_scene" and not self.use_student_structure
-        group_by_scene = True 
+        group_by_scene = False 
         rel_dim = self.cfg.autoencoder.encoder.rel_dim
         sg_filename = (
             "data"
@@ -1876,20 +1840,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
         )
         scene_graphs_ = {}
         frame_batch = [sample["frame_idx"] for sample in batch]
-        if group_by_scene:
-            seen = set()
-            scans_unique = []
-            frames_unique = []
-            for sid, fid in zip(scans_batch, frame_batch):
-                if sid in seen:
-                    continue
-                seen.add(sid)
-                scans_unique.append(sid)
-                frames_unique.append(fid)
-            scans_batch = scans_unique
-            frame_batch = frames_unique
-            data_dict["batch_size"] = len(scans_batch)
-
+        # each item corresponds to a (scene, frame) -> one student pack
         scene_graphs_["scene_ids"] = np.array([[sid] for sid in scans_batch])
         scene_graphs_["frame_ids"] = frame_batch
 
@@ -1978,16 +1929,12 @@ class Scan3RSceneBatchDataset(data.Dataset):
         image_frames = {sid: list(dict.fromkeys(fids)) for sid, fids in image_frames.items()}
         # _LOGGER.info(f"image_frames: {image_frames}")
 
-        if self.use_student_structure and self.single_view_supervision_frames > 0:
-            # _LOGGER.info(f"single_view_supervision_frames: {self.single_view_supervision_frames}")
-            for sid, fids in image_frames.items():
-                needed = self.single_view_supervision_frames - len(fids)
-                if needed > 0:
-                    extra = self._sample_extra_frames(sid, needed, fids)
-                    fids.extend(extra)
-            image_frames = {
-                sid: list(dict.fromkeys(fids)) for sid, fids in image_frames.items()
-            }
+        if self.use_student_structure:
+            # STRICT: supervise ONLY on the same frame that built the student pack.
+            # We set image_frames[sid] = [the frame_idx in this batch for sid].
+            # If you have multiple items of the same sid in the batch, keep all their fids
+            # but each item should be supervised on its own fid (see section 2).
+            pass
             # _LOGGER.info(f"image_frames after single view supervision agg: {image_frames}")
 
         scene_graphs_["image_frames"] = image_frames

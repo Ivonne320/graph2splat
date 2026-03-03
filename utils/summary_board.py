@@ -28,6 +28,8 @@ class SummaryBoard:
             self.register_all(names)
 
     def register_meter(self, name, last_n=None):
+        # if last_n is None:
+        #     last_n = self.last_n
         self.meter_dict[name] = AverageMeter(last_n)
         self.meter_names.append(name)
 
@@ -60,7 +62,8 @@ class SummaryBoard:
             )
         for key, value in result_dict.items():
             if key not in self.meter_names and self.adaptive:
-                self.register_meter(key, last_n)
+                effective_n = last_n if last_n is not None else self.last_n
+                self.register_meter(key, effective_n)
             if key in self.meter_names:
                 self.meter_dict[key].update(value)
 

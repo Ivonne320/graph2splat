@@ -9,6 +9,7 @@ import torch.distributed as dist
 import torch.utils.data
 
 from src.modules.sparse.basic import SparseTensor
+from src.representations.gaussian.gaussian_model import Gaussian
 
 
 def release_cuda(x):
@@ -19,6 +20,10 @@ def release_cuda(x):
         x = (release_cuda(item) for item in x)
     elif isinstance(x, dict):
         x = {key: release_cuda(value) for key, value in x.items()}
+    elif isinstance(x, SparseTensor):
+        x = x.to("cpu")
+    elif isinstance(x, Gaussian):
+        x.to("cpu")
     elif isinstance(x, torch.Tensor):
         if x.numel() == 1:
             x = x.item()
@@ -35,6 +40,10 @@ def release_cuda_torch(x):
         x = (release_cuda_torch(item) for item in x)
     elif isinstance(x, dict):
         x = {key: release_cuda_torch(value) for key, value in x.items()}
+    elif isinstance(x, SparseTensor):
+        x = x.to("cpu")
+    elif isinstance(x, Gaussian):
+        x.to("cpu")
     elif isinstance(x, torch.Tensor):
         if x.numel() == 1:
             x = x.item()

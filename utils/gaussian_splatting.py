@@ -10,7 +10,7 @@ from utils.general_utils import build_scaling_rotation, inverse_sigmoid, strip_s
 
 
 class GaussianSplat:
-    max_sh_degree = 3
+    max_sh_degree = 0
 
     def __init__(
         self,
@@ -23,18 +23,26 @@ class GaussianSplat:
     ):
         self.xyz = xyz.reshape(-1, 3)
         self.features_dc = features_dc.reshape(-1, 1, 3)
+        rest_dim = (self.max_sh_degree + 1) ** 2 - 1
         if features_rest is None:
-            features_rest = torch.zeros(
-                (self.xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1),
-                device=xyz.device,
+            if rest_dim <= 0:
+                features_rest = torch.zeros(
+                    (self.xyz.shape[0], 0, 3), device=xyz.device
+                )
+            else:
+                features_rest = torch.zeros(
+                    (self.xyz.shape[0], 3, rest_dim), device=xyz.device
+                )
+        if rest_dim <= 0:
+            self.features_rest = torch.zeros(
+                (self.xyz.shape[0], 0, 3), device=xyz.device
             )
-        self.features_rest = features_rest.reshape(
-            -1, 3, (self.max_sh_degree + 1) ** 2 - 1
-        )
+        else:
+            self.features_rest = features_rest.reshape(-1, 3, rest_dim)
         self.opacity = opacity.reshape(-1, 1)
         self.scaling = scaling.reshape(-1, 3)
         self.rotation = rotation.reshape(-1, 4)
-        self.max_sh_degree = 3
+        self.max_sh_degree = 0
         self.active_sh_degree = 0
 
         self.setup_functions()
@@ -73,9 +81,9 @@ class GaussianSplat:
         self,
     ) -> torch.Tensor:  # Shape: (batch_size, 3 + 3 * ((max_sh_degree + 1) ** 2 - 1))
         features_dc = self.features_dc.reshape(-1, 1, 3)
-        features_rest = self.features_rest.reshape(
-            -1, (self.max_sh_degree + 1) ** 2 - 1, 3
-        )
+        rest_dim = (self.max_sh_degree + 1) ** 2 - 1
+        if rest_dim > 0 and self.features_rest.numel() > 0:
+            _ = self.features_rest.reshape(-1, rest_dim, 3)
         return features_dc
 
     @property

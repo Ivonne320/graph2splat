@@ -25,30 +25,32 @@ class LatentAutoencoder(nn.Module):
         cfg: AutoencoderConfig,
         device: str = "cuda",
         downsample: bool = False,
-        load_pretrained: bool = True,
+        load_pretrained: bool = False,
     ) -> None:
         super(LatentAutoencoder, self).__init__()
         self.cfg = cfg
         json_path = f"{SCRATCH}/TRELLIS-image-large/pipeline.json"
         with open(json_path, "r") as f:
             trellis_pipeline = json.load(f)
-
+        load_pretrained = True
         if load_pretrained:
             path = trellis_pipeline["args"]["models"]["slat_encoder"]
             with open(f"{SCRATCH}/TRELLIS-image-large/{path}.json", "r") as f:
                 configs = json.load(f)
+            configs["args"]["resolution"]=256
+            
             state_dict = load_file(f"{SCRATCH}/TRELLIS-image-large/{path}.safetensors")
             self.encoder = SLatEncoder(**configs["args"])
             self.encoder.load_state_dict(state_dict, strict=False)
             self.encoder = self.encoder.to(device)
         else:
             self.encoder = SLatEncoder(
-                resolution=64,
-                in_channels=768,
+                resolution=256,
+                in_channels=1024,
                 model_channels=768,
-                latent_channels=8,
-                num_blocks=4,
-                num_heads=4,
+                latent_channels=16,
+                num_blocks=12,
+                num_heads=12,
                 use_fp16=True,
             ).to(device)
 
@@ -58,21 +60,32 @@ class LatentAutoencoder(nn.Module):
                 configs = json.load(f)
             state_dict = load_file(f"{SCRATCH}/TRELLIS-image-large/{path}.safetensors")
             configs["args"]["representation_config"]["sh_degree"] =  self.cfg.sh_degree
+            # configs["args"]["representation_config"]["sh_degree"] = 1
+            # self.cfg.sh_degree = 1
+            # configs["args"]["representation_config"]["lr"]["_scaling"] = 0.1
             if self.cfg.sh_degree > 0:
                 configs["args"]["representation_config"]["lr"]["_features_rest"] = 1.0
-            configs["args"]["representation_config"]["num_gaussians"]=self.cfg.num_gaussians
-            
+            # configs["args"]["representation_config"]["num_gaussians"]=self.cfg.num_gaussians
+            configs["args"]["representation_config"]["num_gaussians"]=8
+            # configs["args"]["representation_config"]["perturb_offset"] = False
+            # configs["args"]["representation_config"]["voxel_size"]=1.5
+            configs["args"]["representation_config"]["scaling_bias"]= 8e-4
+            configs["args"]["representation_config"]["scaling_activation"] = 'exp'
+            configs["args"]["resolution"]=256
+            configs["args"]["latent_channels"]=1024
+            configs["args"]["representation_config"]["3d_filter_kernel_size"] = 2e-4
+
             
             net = SLatGaussianDecoder(**configs["args"])
             # net.load_state_dict(state_dict)
 
         else:
             net = SLatGaussianDecoder(
-                resolution=64,
+                resolution=256,
                 model_channels=768,
-                latent_channels=8,
-                num_blocks=4,
-                num_heads=4,
+                latent_channels=19,
+                num_blocks=12,
+                num_heads=12,
                 num_head_channels=64,
                 use_fp16=True,
             ).to(device)

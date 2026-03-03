@@ -4,10 +4,11 @@ import pickle
 import re
 from functools import lru_cache
 from glob import glob
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 
 import numpy as np
 import open3d as o3d
+from PIL import Image
 from plyfile import PlyData
 from scipy.spatial.transform import Rotation as R
 
@@ -191,7 +192,7 @@ def load_frame_idxs(data_dir, scan_id, skip=None):
 
     return frame_idxs
 
-def load_frame_idxs_held_out(data_dir, scan_id, skip=None, heldout_ratio=0.2, seed=42):
+def load_frame_idxs_held_out(data_dir, scan_id, skip=None, heldout_ratio=0.1, seed=42):
     """
     Returns:
         input_frame_idxs: List[str]
@@ -219,17 +220,63 @@ def load_frame_idxs_held_out(data_dir, scan_id, skip=None, heldout_ratio=0.2, se
     return input_frame_idxs, heldout_frame_idxs
 
 
-def load_frame_paths(data_dir, scan_id, skip=None):
+def _laplacian_focus_score(path: str, downsample_max_dim: int = 256) -> float:
+    """
+    Compute a simple focus metric using the variance of the Laplacian.
+    Larger scores indicate a sharper image.
+    """
+    try:
+        with Image.open(path) as img:
+            gray = img.convert("L")
+            if downsample_max_dim is not None and max(gray.size) > downsample_max_dim:
+                scale = downsample_max_dim / max(gray.size)
+                new_w = max(1, int(round(gray.width * scale)))
+                new_h = max(1, int(round(gray.height * scale)))
+                gray = gray.resize((new_w, new_h), Image.BILINEAR)
+            gray_np = np.asarray(gray, dtype=np.float32)
+    except (OSError, ValueError):
+        return 0.0
+
+    if gray_np.size == 0:
+        return 0.0
+    padded = np.pad(gray_np, 1, mode="edge")
+    center = padded[1:-1, 1:-1]
+    lap = (
+        -4.0 * center
+        + padded[:-2, 1:-1]
+        + padded[2:, 1:-1]
+        + padded[1:-1, :-2]
+        + padded[1:-1, 2:]
+    )
+    return float(lap.var())
+
+
+def load_frame_paths(
+    data_dir,
+    scan_id,
+    skip=None,
+    min_focus: float = 80,
+    focus_downsample: int = 256,
+    max_frames: Optional[int] = 150,
+):
     frame_idxs = load_frame_idxs(osp.join(data_dir, "scenes"), scan_id, skip)
+    if max_frames is not None and len(frame_idxs) > max_frames:
+        frame_idxs = frame_idxs[:max_frames]
     img_folder = osp.join(data_dir, "scenes", scan_id, "sequence")
 
     img_paths = {}
+    filtered_idx = []
     for frame_idx in frame_idxs:
         img_name = "frame-{}.color.jpg".format(frame_idx)
         img_path = osp.join(img_folder, img_name)
+        if min_focus is not None:
+            score = _laplacian_focus_score(img_path, focus_downsample)
+            if score < min_focus:
+                filtered_idx.append(frame_idx)
+                continue
         img_paths[frame_idx] = img_path
 
-    return img_paths
+    return img_paths, filtered_idx
 
 
 def load_frame_poses_paths(data_dir, scan_id, skip=None):

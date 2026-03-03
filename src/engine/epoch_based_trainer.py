@@ -7,6 +7,7 @@ from typing import Any, Dict, Tuple
 import ipdb
 import torch
 import tqdm
+import torch.nn as nn
 
 from utils import torch_util
 from utils.common import get_log_string
@@ -15,6 +16,47 @@ from utils.timer import Timer
 
 from .base_trainer import BaseTrainer
 
+def summarize_nonfinite_grad_(model) -> str:
+    """Return a short message about the first param with NaN/Inf grad."""
+    for name, p in model.named_parameters():
+        g = p.grad
+        if g is None:
+            continue
+        bad = ~torch.isfinite(g)
+        if bad.any().item():
+            ravel = bad.view(-1)
+            idx0 = torch.nonzero(ravel, as_tuple=False)[0, 0].item()
+            # unravel index for readability
+            unr = torch.unravel_index(torch.tensor(idx0, device=g.device), g.shape)
+            val = g[unr].item()
+            kind = "nan" if torch.isnan(g).any().item() else "inf"
+            return f"{name}: first {kind} grad at idx={tuple(int(i) for i in unr)}, val={val}, shape={tuple(g.shape)}"
+    return "all finite"
+
+def grads_are_finite(model) -> bool:
+    for p in model.parameters():
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            return False
+    return True
+
+def summarize_nonfinite_loss(loss_dict: dict) -> str:
+    """Return a short message about the first loss term that is NaN/Inf or absurd."""
+    for k, v in loss_dict.items():
+        if not torch.is_tensor(v):
+            continue
+        if (~torch.isfinite(v)).any().item():
+            which = "nan" if torch.isnan(v).any().item() else "inf"
+            val = (v.detach().item() if v.numel() == 1 else "tensor")
+            return f"{k}: {which}, value={val}"
+    return "all finite"
+
+def losses_are_finite(loss_dict: dict) -> bool:
+    for v in loss_dict.values():
+        if torch.is_tensor(v) and not torch.isfinite(v).all().item():
+            return False
+    return True
+
+
 
 class EpochBasedTrainer(BaseTrainer):
     def __init__(
@@ -22,7 +64,7 @@ class EpochBasedTrainer(BaseTrainer):
         cfg,
         parser=None,
         cudnn_deterministic=True,
-        autograd_anomaly_detection=False,
+        autograd_anomaly_detection=True,
         save_all_snapshots=True,
         run_grad_check=False,
         grad_acc_steps=1,
@@ -105,17 +147,44 @@ class EpochBasedTrainer(BaseTrainer):
             self.logger.error("Data_dict and model snapshot saved.")
             ipdb.set_trace()
 
+    @torch.no_grad()
+    def apply_agc(self, model: nn.Module, clip_factor: float = 0.05, eps: float = 1e-3):
+        """
+        Adaptive Gradient Clipping (Brock et al., 2021).
+        For weight-like tensors (ndim >= 2): ||g|| <= clip_factor * (||w|| + eps)
+        Call after scaler.unscale_(opt) and before clip_grad_norm_.
+        """
+        for p in model.parameters():
+            if p.grad is None or not p.requires_grad:
+                continue
+            if p.ndim < 2:  # skip biases/LayerNorm gains
+                continue
+            w = p.detach()
+            g = p.grad.detach()
+            w_norm = w.norm(p=2)
+            g_norm = g.norm(p=2)
+            max_g = clip_factor * (w_norm + eps)
+            if torch.isfinite(g_norm) and g_norm > max_g:
+                p.grad.mul_(max_g / (g_norm + 1e-6))
+
     def train_epoch(self):
-        if self.distributed:
-            self.train_loader.sampler.set_epoch(self.epoch)
+        # if self.distributed:
+        #     self.train_loader.sampler.set_epoch(self.epoch)
+        if hasattr(self.train_loader, "sampler") and self.train_loader.sampler is not None:
+            if hasattr(self.train_loader.sampler, "set_epoch"):
+                self.train_loader.sampler.set_epoch(self.epoch)
+        if hasattr(self.train_loader, "batch_sampler") and hasattr(self.train_loader.batch_sampler, "set_epoch"):
+            self.train_loader.batch_sampler.set_epoch(self.epoch)
 
         self.before_train_epoch(self.epoch)
-        self.optimizer.zero_grad()
+        # self.optimizer.zero_grad()
         total_iterations = len(self.train_loader)
 
         output_dict = None
         result_dict = None
         self.run_vis = True
+        accum_steps = 1
+        m = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
         for iteration, data_dict in enumerate(self.train_loader):
             output_dict = None
             result_dict = None
@@ -133,10 +202,47 @@ class EpochBasedTrainer(BaseTrainer):
 
             # forward
             try:
-                output_dict, result_dict = self.train_step(
-                    self.epoch, self.inner_iteration, data_dict
-                )
-                result_dict["loss"].backward(retain_graph=False)
+                
+                with torch.autograd.set_detect_anomaly(False):
+                    output_dict, result_dict = self.train_step(
+                        self.epoch, self.inner_iteration, data_dict
+                    )
+                    result_dict["loss"].backward(retain_graph=False)
+                    if not losses_are_finite(result_dict):
+                        msg = summarize_nonfinite_loss(result_dict)
+                        self.logger.error(f"[loss-check] non-finite losses: {msg}")
+                    if not grads_are_finite(m):
+                        # self.logger.error("[grad-check] non-finite gradients: %s", summarize_nonfinite_grad_(m))
+                        msg = summarize_nonfinite_grad_(m)
+                        self.logger.error(f"[grad-check] non-finite gradients: {msg}")
+
+                    is_final_iter = (iteration + 1) == total_iterations
+                    do_step = is_final_iter or ((iteration + 1) % accum_steps == 0)
+                    if do_step:
+                        if self.cfg.autoencoder.train_structure:
+                            # pass
+                            # def _gno(model):
+                            #     s = 0.0
+                            #     for p in model.parameters():
+                            #         if p.grad is not None:
+                            #             s += float(p.grad.detach().pow(2).sum().item())
+                            #     return (s ** 0.5)
+                            # self.logger.info(f"[agc] global_norm_before={_gno(m):.5e}")
+                            # self.apply_agc(m, clip_factor=0.4, eps=1e-3)
+                            # self.logger.info(f"[agc] global_norm_before={_gno(m):.5e}")
+                            pass
+                        else:
+                            # def _gno(model):
+                            #     s = 0.0
+                            #     for p in model.parameters():
+                            #         if p.grad is not None:
+                            #             s += float(p.grad.detach().pow(2).sum().item())
+                            #     return (s ** 0.5)
+                            # self.logger.info(f"[agc] global_norm_before={_gno(m):.5e}")
+                            # self.apply_agc(m, clip_factor=0.1, eps=1e-3)
+                            # self.logger.info(f"[agc] global_norm_before={_gno(m):.5e}")
+                            pass
+                        
             except (RuntimeError, KeyError) as e:
                 self.logger.warning(e)
                 # print("backward error")
@@ -148,6 +254,7 @@ class EpochBasedTrainer(BaseTrainer):
                     result_dict = self.release_tensors(result_dict)
                     del result_dict
                 del data_dict
+                # self.optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
                 gc.collect()
                 continue
@@ -158,11 +265,12 @@ class EpochBasedTrainer(BaseTrainer):
                 self.epoch, self.inner_iteration, data_dict, output_dict, result_dict
             )
             self.log_gradients(self.epoch, self.epoch)
-            if self.cfg.train.clip_grad is not None:
+            if self.cfg.train.clip_grad is not None :
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.cfg.train.clip_grad
                 )
-            self.optimizer_step(self.epoch)
+            # self.optimizer_step(self.epoch)
+            self.optimizer_step(self.inner_iteration)
 
             # after training
             self.timer.add_process_time()
@@ -170,6 +278,8 @@ class EpochBasedTrainer(BaseTrainer):
                 self.epoch, self.inner_iteration, data_dict, output_dict, result_dict
             )
             result_dict = self.release_tensors(result_dict)
+            
+
 
             self.summary_board.update_from_result_dict(result_dict)
             lr_dict = {"lr": self.get_lr()}
@@ -191,16 +301,24 @@ class EpochBasedTrainer(BaseTrainer):
                 self.write_event("train", summary_dict, self.iteration)
 
             if (self.inner_iteration) % 2000 == 0:
-                self.inference_epoch()
-                self.run_vis = True
+                # self.inference_epoch()
+                # self.run_vis = True
+                pass
 
             if (self.epoch - 1) % self.visualize_steps == 0 and self.run_vis:
                 self.logger.info("Visualizing...")
                 try:
                     self.visualize(output_dict, self.epoch, mode="train")
+                    if output_dict is not None:
+                        output_dict = self.release_tensors(output_dict)
+                        del output_dict
                 except RuntimeError as e:
                     self.logger.error(e)
                 self.run_vis = False
+            else:
+                if output_dict is not None:
+                    output_dict = self.release_tensors(output_dict)
+                    del output_dict
             torch.cuda.empty_cache()
         self.after_train_epoch(self.epoch)
         message = get_log_string(
@@ -295,6 +413,7 @@ class EpochBasedTrainer(BaseTrainer):
     def set_train_mode(self):
         self.training = True
         self.model.train()
+        
         torch.set_grad_enabled(True)
 
     @abc.abstractmethod
@@ -317,4 +436,5 @@ class EpochBasedTrainer(BaseTrainer):
             if self.mode == "train" or self.mode == "debug_few_scan":
                 self.train_epoch()
             if (self.epoch - 1) % self.val_steps == 0:
-                self.inference_epoch()
+                # self.inference_epoch()
+                pass

@@ -110,14 +110,7 @@ class Trainer(EpochBasedTrainer):
             eps=1e-3,
             # fused=False
         )
-        # optimizer.step()   # dummy step to init states
-        # optimizer.zero_grad()
-
-        # Now cast states to FP32
-        # for state in optimizer.state.values():
-        #     for k, v in state.items():
-        #         if torch.is_tensor(v):
-        #             state[k] = v.float()
+        
         self.register_optimizer(optimizer)
 
         # scheduler
@@ -166,9 +159,9 @@ class Trainer(EpochBasedTrainer):
 
         if scheduler is not None:
             self.register_scheduler(scheduler)
-        self.scans2ref = self._build_scan_to_ref()
-        self.scan_transforms = scan3r.read_transform_mat(osp.join(self.cfg.data.root_dir, "files", "3RScan.json"))
-        self.logger.info("Initialisation Complete")
+        # self.scans2ref = self._build_scan_to_ref()
+        # self.scan_transforms = scan3r.read_transform_mat(osp.join(self.cfg.data.root_dir, "files", "3RScan.json"))
+        # self.logger.info("Initialisation Complete")
     def init_sh_weights(self, model):
         layout = model.decoder.layout  # or decoder_complex
         weight = model.decoder.out_layer.weight
@@ -181,16 +174,7 @@ class Trainer(EpochBasedTrainer):
         start, end = layout["_features_rest"]["range"]
         nn.init.normal_(weight[start:end], mean=0.0, std=0.01)
         nn.init.constant_(bias[start:end], 0.0)
-    def _build_scan_to_ref(self) -> dict[str, str]:
-        scan_info_file = osp.join(self.cfg.data.root_dir, "files", "3RScan.json")
-        all_scan_data = common.load_json(scan_info_file)
-        scans2ref = {}
-        for scan_data in all_scan_data:
-            ref_id = scan_data["reference"]
-            scans2ref[ref_id] = ref_id
-            for s in scan_data["scans"]:
-                scans2ref[s["reference"]] = ref_id
-        return scans2ref
+   
     def create_model(self) -> LatentAutoencoder:
         if self.cfg.autoencoder.guidance:
             from src.guidance.text_guidance import TextGuidance
@@ -211,7 +195,7 @@ class Trainer(EpochBasedTrainer):
         # )
         # model.load_state_dict(
         #     torch.load(
-        #         "/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/batch/debug/20251218_summary_single_scene_resolution/20260110_128_reso_10_scenes_filter_visible_voxel/snapshots/epoch-60.pth.tar", map_location=self.device
+        #         "/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/10-clean/test-128-no-dilation/snapshots/epoch-120.pth.tar", map_location=self.device
         #     )["model"]
         # )
         # model.load_state_dict(
@@ -282,16 +266,10 @@ class Trainer(EpochBasedTrainer):
 
         reconstruction.rescale(torch.tensor([2.0, 2.0, 2.0], device=device))
         reconstruction.translate(torch.tensor([-1.0, -1.0, -1.0], device=device))
-
-        scale_vec = scale.flatten()
-        if scale_vec.numel() == 1:
-            scale_vec = scale_vec.repeat(3)
-        reconstruction.rescale(scale_vec.to(device))
-
-        translation_vec = translation.flatten()
-        if translation_vec.numel() == 1:
-            translation_vec = translation_vec.repeat(3)
-        reconstruction.translate(translation_vec.to(device))
+        # self.logger.info(f"scale:{scale}")
+        # self.logger.info(f"translation:{translation}")
+        reconstruction.rescale(scale)
+        reconstruction.translate(translation)
     # def _apply_scene_alignment(self, reconstruction, translation, scale):
     #     device = reconstruction.get_xyz.device
 
@@ -325,10 +303,10 @@ class Trainer(EpochBasedTrainer):
             bbox_scale = bbox_scale.repeat(3)
         elif bbox_scale.numel() > 3:
             bbox_scale = bbox_scale[:3]
-        max_scale = 10.0 * (bbox_scale / 128).clamp_min(1e-7)
+        max_scale = 1.2 * (bbox_scale / 256.0).clamp_min(1e-7)
         # self.logger.info(f"max_scale:{max_scale}")
         # max_scale = torch.nan_to_num(max_scale, nan=1e-3, posinf=1e-3, neginf=1e-3)
-        min_allowed = 9e-4 + 1e-6
+        min_allowed = 2e-4 + 1e-6
         current_scale = reconstruction.get_scaling
         current_scale = torch.nan_to_num(current_scale, nan=1e-3, posinf=1e-3, neginf=1e-3)
         # clamped = current_scale
@@ -342,8 +320,7 @@ class Trainer(EpochBasedTrainer):
     def train_step(
         self, epoch: int, iteration: int, data_dict: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        if self.object_level:
-            return self._train_step_object(epoch, iteration, data_dict)
+        
         return self._train_step_scene(epoch, iteration, data_dict)
 
     def _train_step_scene(
@@ -356,7 +333,7 @@ class Trainer(EpochBasedTrainer):
         scene_ids = data_dict["scene_graphs"]["scene_ids"]
         # self.logger.info(f"scene_ids before: {scene_ids}")
         scene_ids = [sid[0] for sid in scene_ids]
-        ref_ids = data_dict["scene_graphs"].get("ref_ids", None)
+        # ref_ids = data_dict["scene_graphs"].get("ref_ids", None)
         # self.logger.info(f"scene_ids after: {scene_ids}")
         intrinsic = data_dict["scene_graphs"]["obj_intrinsics"]
         # self.logger.info(f"intrinsic: {intrinsic}")
@@ -368,8 +345,9 @@ class Trainer(EpochBasedTrainer):
         image_frames = data_dict["scene_graphs"]["image_frames"] 
         obj_2D_masks = data_dict["scene_graphs"]['obj_2D_masks']
         # with torch.no_grad():
-        embedding = self.model.encode(data_dict)
-        embedding = self._append_log_scale_to_sparse(embedding, scales)
+        # embedding = self.model.encode(data_dict)
+        embedding = data_dict["scene_graphs"]["tot_obj_splat"]
+        # embedding = self._append_log_scale_to_sparse(embedding, scales)
         reconstruction = self.model.decode(embedding)
         # for recon in reconstruction:
         #     clean = torch.nan_to_num(recon.get_scaling, nan=1e-3, posinf=1e-3, neginf=1e-3)
@@ -398,8 +376,7 @@ class Trainer(EpochBasedTrainer):
         # --- loop over scenes in the batch ---
         for b, sid in enumerate(scene_ids):
             # ref_id = self.scans2ref.get(sid, sid)
-            ref_id = ref_ids[b] if ref_ids is not None else self.scans2ref.get(sid, sid)
-            rid = ref_id
+            
             self.logger.info(f"sid: {sid}")
             recon_b = reconstruction[b]
             self._apply_scene_alignment(reconstruction[b], translations[b], scales[b])
@@ -428,13 +405,13 @@ class Trainer(EpochBasedTrainer):
             # )
             extrinsics_frames = scan3r.load_frame_poses(
                 self.cfg.data.root_dir,
-                ref_id,              # <-- was sid
+                sid,              # <-- was sid
                 tuple(fids),
             )
 
-            # intrinsics = intrinsic[sid]
+            intrinsics = intrinsic[sid]
             scenes_dir = osp.join(self.cfg.data.root_dir, "scenes")
-            intrinsics = scan3r.load_intrinsics(scenes_dir, scan_id=ref_id)
+            # intrinsics = scan3r.load_intrinsics(scenes_dir, scan_id=ref_id)
             H, W = int(intrinsics["height"]), int(intrinsics["width"])
             fx, fy = intrinsics["intrinsic_mat"][0, 0], intrinsics["intrinsic_mat"][1, 1]
             K = intrinsics["intrinsic_mat"]
@@ -445,10 +422,10 @@ class Trainer(EpochBasedTrainer):
             # Pre-build the 4x4 “apply R_can” matrix
             R_h = np.eye(4, dtype=np.float32)
             # R_h[:3, :3] = R_can
-            self.logger.info(f"computed ref_id: {ref_id}")
+            # self.logger.info(f"computed ref_id: {ref_id}")
             for fid in fids:
                 # --- load GT image ---
-                img_path = f"{self.cfg.data.root_dir}/scenes/{ref_id}/sequence/frame-{fid}.color.jpg"
+                img_path = f"{self.cfg.data.root_dir}/scenes/{sid}/sequence/frame-{fid}.color.jpg"
                 image = Image.open(img_path)
                 image = torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0  # (3,H,W)
                 image = image.to(self.device, non_blocking=True)
@@ -459,11 +436,7 @@ class Trainer(EpochBasedTrainer):
                 extrinsics = extrinsics_frames[fid]               # (4,4) cam->world or world->cam as your util defines
                 # extrinsics =  R_h @ extrinsics                   # apply canonical rot in world
                 pose_camera_to_world = np.linalg.inv(extrinsics)  # adapt to your convention
-                # world_to_camera = pose_quatmat_to_rotmat(extrinsics)
-                # world_to_camera = extrinsics
-                # world_view_transform = torch.tensor(world_to_camera, device="cuda", dtype=torch.float32)
-                # projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
-                # full_proj_transform = world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0)).squeeze(0)
+              
                 xyz = reconstruction[b].get_xyz
                 scaling = reconstruction[b].get_scaling
                 opacity = reconstruction[b].get_opacity
@@ -482,19 +455,7 @@ class Trainer(EpochBasedTrainer):
                         f"NaN/Inf detected for {sid}, frame {fid}; skipping render. Bad tensors: {', '.join(bad_fields)}"
                     )
                     continue
-                # viewpoint_camera = MiniCam(
-                #     width=W,
-                #     height=H,
-                #     fovy=fovy,
-                #     fovx=fovx,
-                #     znear=0.01,
-                #     zfar=100.0,
-                #     R=pose_camera_to_world[:3, :3].T,
-                #     T=pose_camera_to_world[:3, 3],
-                #     K=K,
-                #     # R=pose_camera_to_world[:3, :3].T,
-                #     # T=extrinsics[:3, 3]
-                # )
+               
                 C2W = extrinsics_frames[fid]        # camera -> world
                 R_cw = C2W[:3, :3]
                 t_cw = C2W[:3, 3]
@@ -545,12 +506,7 @@ class Trainer(EpochBasedTrainer):
                 rendered = rendered * mask
                 image = image * mask
 
-                # valid_pixels = mask.sum()
-                # if valid_pixels < 10.0:
-                #     continue
-                # diff = torch.abs(rendered - image)
-                # l1_term = diff.sum() / valid_pixels
-                # l1_terms.append(l1_term)
+               
                 l1_terms.append(l1_loss(rendered, image))
                 # ssim_terms.append(ssim(rendered, image)/(mask.mean() + 1e-6))
                 ssim_terms.append(ssim(rendered, image))
@@ -564,29 +520,7 @@ class Trainer(EpochBasedTrainer):
                         rendered_lpips.unsqueeze(0), image_lpips.unsqueeze(0)
                     )
                 )
-                # coords = torch.nonzero(mask[0])
-                # if coords.shape[0] > 0:
-                #     y_min, x_min = coords.min(dim=0).values
-                #     y_max, x_max = coords.max(dim=0).values
-                    
-                #     # Add a small margin (e.g., 8 pixels) to keep context
-                #     margin = 8
-                #     y_min = max(0, y_min - margin)
-                #     y_max = min(H, y_max + margin)
-                #     x_min = max(0, x_min - margin)
-                #     x_max = min(W, x_max + margin)
-
-                #     rendered_crop = rendered[:, y_min:y_max, x_min:x_max]
-                #     image_crop = image[:, y_min:y_max, x_min:x_max]
-                    
-                #     # Calculate SSIM and LPIPS on the CROP, not the whole image
-                #     ssim_terms.append(ssim(rendered_crop.unsqueeze(0), image_crop.unsqueeze(0)))
-                    
-                #     rendered_lpips = rendered_crop.clamp(0.0, 1.0) * 2.0 - 1.0
-                #     image_lpips = image_crop.clamp(0.0, 1.0) * 2.0 - 1.0
-                #     perceptual_terms.append(
-                #         self.perceptual_loss(rendered_lpips.unsqueeze(0), image_lpips.unsqueeze(0))
-                #     )
+               
                 frames_processed += 1
 
                 if len(preview_preds) < max_preview:
@@ -604,6 +538,7 @@ class Trainer(EpochBasedTrainer):
         ssim_mean = torch.stack(ssim_terms).mean()
         perceptual_loss = torch.stack(perceptual_terms).mean()
         protometric_loss = 0.8 * l1_mean + 0.2 * (1.0 - ssim_mean)
+        # protometric_loss = l1_mean + 0.2 * (1.0 - ssim_mean)
 
         loss = (
             protometric_loss 
@@ -621,7 +556,8 @@ class Trainer(EpochBasedTrainer):
             "perceptual_loss": perceptual_loss.detach(),
         }
 
-        reconstruction_cpu = [recon.to("cpu") for recon in reconstruction]
+        # reconstruction_cpu = [recon.to("cpu") for recon in reconstruction]
+        reconstruction_cpu = reconstruction
 
         if preview_preds:
             predicted_images_cpu = torch.stack(preview_preds, dim=0)
@@ -637,159 +573,7 @@ class Trainer(EpochBasedTrainer):
         }
         return output_dict, loss_dict
 
-    def _train_step_object(
-        self, epoch: int, iteration: int, data_dict: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        assert self.model is not None and isinstance(self.model, LatentAutoencoder)
 
-        scene_graphs = data_dict["scene_graphs"]
-        scene_ids = scene_graphs["scene_ids"]
-        obj_ids = scene_graphs["obj_ids"]
-        img_poses = scene_graphs["obj_img_poses"]
-        intrinsic = scene_graphs["obj_intrinsics"]
-        frames = scene_graphs["obj_img_top_frames"]
-        masks = scene_graphs["obj_annos"]
-        translations = scene_graphs["mean_obj_splat"]
-        scales = scene_graphs["scale_obj_splat"]
-
-        embedding = self.model.encode(data_dict)
-        reconstruction = self.model.decode(embedding)
-
-        predicted_images: List[torch.Tensor] = []
-        ground_truth_images: List[torch.Tensor] = []
-        preview_preds: List[torch.Tensor] = []
-        preview_gts: List[torch.Tensor] = []
-        max_preview = 4
-
-        all_scales = torch.cat([recon.get_scaling for recon in reconstruction], dim=0)
-        volume_loss = torch.prod(all_scales, dim=1).mean()
-        opacity_loss = torch.cat(
-            [((1 - recon.get_opacity) ** 2) for recon in reconstruction], dim=0
-        ).mean()
-
-        for i in range(len(reconstruction)):
-            scene_id = scene_ids[i][0]
-            obj_id = obj_ids[i]
-
-            if scene_id not in frames or obj_id not in frames[scene_id]:
-                continue
-
-            pose_candidates = img_poses[scene_id][obj_id]
-            frame_candidates = frames[scene_id][obj_id]
-            if len(frame_candidates) == 0:
-                continue
-
-            pose_idx = np.random.randint(0, len(frame_candidates))
-            frame_id = frame_candidates[pose_idx]
-            extrinsics = pose_candidates[pose_idx]
-            if isinstance(extrinsics, torch.Tensor):
-                extrinsics_np = extrinsics.cpu().numpy()
-            else:
-                extrinsics_np = np.asarray(extrinsics)
-
-            image = Image.open(
-                f"{self.cfg.data.root_dir}/scenes/{scene_id}/sequence/frame-{frame_id}.color.jpg"
-            )
-            image = (
-                torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255.0
-            ).to(self.device)
-
-            mask_np = masks[scene_id][frame_id]
-            obj_mask = np.where(mask_np == int(obj_id), 1.0, 0.0).astype(np.float32)
-            mask_tensor = torch.from_numpy(obj_mask).to(self.device)
-            if mask_tensor.ndim == 2:
-                mask_tensor = mask_tensor.unsqueeze(0)
-            image_masked = image * mask_tensor
-
-            self._apply_scene_alignment(reconstruction[i], translations[i], scales[i])
-            self._clamp_gaussian_scale(reconstruction[i], scales[i])
-
-            pose_camera_to_world = np.linalg.inv(pose_quatmat_to_rotmat(extrinsics_np))
-            intr = intrinsic[scene_id]
-            fovx = focal2fov(intr["intrinsic_mat"][0, 0], intr["width"])
-            fovy = focal2fov(intr["intrinsic_mat"][1, 1], intr["height"])
-            viewpoint_camera = MiniCam(
-                width=int(intr["width"]),
-                height=int(intr["height"]),
-                fovy=fovy,
-                fovx=fovx,
-                znear=0.01,
-                zfar=100.0,
-                R=pose_camera_to_world[:3, :3].T,
-                T=pose_camera_to_world[:3, 3],
-            )
-
-            if self.cfg.autoencoder.sh_degree == 0:
-                pipe_cfg = Namespace(
-                    debug=False,
-                    compute_cov3D_python=False,
-                    convert_SHs_python=False,
-                )
-            else:
-                pipe_cfg = Namespace(
-                    debug=False,
-                    compute_cov3D_python=False,
-                    convert_SHs_python=True,
-                )
-
-            rendered_image = render(
-                viewpoint_camera,
-                reconstruction[i],
-                pipe=pipe_cfg,
-                bg_color=torch.tensor((0.0, 0.0, 0.0), device=self.device),
-            )["render"]
-
-            predicted_images.append(rendered_image)
-            ground_truth_images.append(image_masked)
-
-            if len(preview_preds) < max_preview:
-                preview_preds.append(rendered_image)
-                preview_gts.append(image_masked)
-
-        if len(predicted_images) == 0:
-            return {}, {}
-
-        predicted_images_tensor = torch.stack(predicted_images).squeeze(1)
-        ground_truth_images_tensor = torch.stack(ground_truth_images).squeeze(1)
-
-        protometric_loss = 0.8 * l1_loss(
-            predicted_images_tensor, ground_truth_images_tensor
-        ) + 0.2 * (1.0 - ssim(predicted_images_tensor, ground_truth_images_tensor))
-        perceptual_loss = self.perceptual_loss(
-            predicted_images_tensor, ground_truth_images_tensor
-        )
-
-        loss = (
-            protometric_loss * 0.5
-            # + self.volume_loss_weight * volume_loss
-            + volume_loss
-            + self.opacity_loss_weight * opacity_loss
-            + perceptual_loss * 0.5
-        ) * self.cfg.train.loss.decoder_weight
-
-        loss_dict = {
-            "loss": loss,
-            "l1_loss": protometric_loss.detach(),
-            "volume_loss": volume_loss.detach(),
-            "opacity_loss": opacity_loss.detach(),
-            "perceptual_loss": perceptual_loss.detach(),
-        }
-
-        reconstruction_cpu = [recon.to("cpu") for recon in reconstruction]
-        if preview_preds:
-            predicted_images_cpu = torch.stack(preview_preds, dim=0).detach().cpu()
-            ground_truth_images_cpu = torch.stack(preview_gts, dim=0).detach().cpu()
-        else:
-            predicted_images_cpu = torch.empty((0, 3, 1, 1))
-            ground_truth_images_cpu = torch.empty((0, 3, 1, 1))
-
-        output_dict = {
-            "reconstruction": reconstruction_cpu,
-            "predicted_images": predicted_images_cpu,
-            "ground_truth_images": ground_truth_images_cpu,
-            "embeddings": embedding,
-        }
-        return output_dict, loss_dict
 
     def after_train_step(self, epoch, iteration, data_dict, output_dict, result_dict):
         # self._save_embeddings(epoch, iteration, data_dict, output_dict)
@@ -813,9 +597,9 @@ class Trainer(EpochBasedTrainer):
     def val_step(
         self, epoch: int, iteration: int, data_dict: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        with torch.no_grad():
-            return self.train_step(epoch, iteration, data_dict)
-        # pass
+        # with torch.no_grad():
+        #     return self.train_step(epoch, iteration, data_dict)
+        pass
 
     def after_val_step(self, epoch, iteration, data_dict, output_dict, result_dict):
         # self._save_embeddings(epoch, iteration, data_dict, output_dict)

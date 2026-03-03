@@ -27,7 +27,6 @@ import torch.nn as nn
 import random
 from PIL import Image
 from torchvision.utils import save_image
-from typing import Optional, Union
 
 from configs import Config, update_configs
 from src.datasets.loaders import get_train_val_data_loader, get_val_dataloader
@@ -63,15 +62,6 @@ class Trainer(EpochBasedTrainer):
         self.bbox_warmup_epochs = 500
         self.recon_weight_after_warmup = 1.0
         self.use_predicted_box_for_remap = True
-        self.flow_loss_weight: float = getattr(cfg.train.loss, "flow_loss_weight", 1.0)
-        self.flow_cond_max_ctx: int = getattr(cfg.train.loss, "flow_cond_max_ctx", 2048)
-        self.flow_cond_rand_fill: int = getattr(cfg.train.loss, "flow_cond_rand_fill", 0)
-        # self.enable_flow_sampling: bool = getattr(
-        #     cfg.train.loss, "flow_sampling_eval", False
-        # )
-        self.enable_flow_sampling = False
-        self.flow_sampling_steps: int = getattr(cfg.train.loss, "flow_sampling_steps", 20)
-        self.flow_sampling_batch: int = getattr(cfg.train.loss, "flow_sampling_batch", 2)
                 
         # Loss params
         self.zoom: float = cfg.train.loss.zoom
@@ -94,9 +84,6 @@ class Trainer(EpochBasedTrainer):
         # model
         model = self.create_model()
         self.register_model(model)
-        # self.has_flow = hasattr(self.model, "flow") and self.model.flow is not None
-        self.has_flow = True
-        self.flow_patch_size: int = getattr(self.model.flow, "patch_size", 1) if self.has_flow else 1
 
         optimizer = optim.AdamW(
             self.model.parameters(),
@@ -160,14 +147,14 @@ class Trainer(EpochBasedTrainer):
         
         model = StructureModel(cfg=self.cfg.autoencoder, device=self.device)
 
-        model.load_state_dict(
-            torch.load(
-                "/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_structure_model/2025-11-5_100_scenes_no_agc_with_flow/snapshots/epoch-1.pth.tar", map_location=self.device
-            )["model"]
-        )
         # model.load_state_dict(
         #     torch.load(
-        #         "/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_structure_model/2025-11-5_100_scenes_continue_turvsky_lambda_8/snapshots/epoch-31.pth.tar", map_location=self.device
+        #         "/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_structure_model_warm_up/2025-10-13_17-41-41/snapshots/epoch-60.pth.tar", map_location=self.device
+        #     )["model"]
+        # )
+        # model.load_state_dict(
+        #     torch.load(
+        #         "/mnt/hdd4tb/trainings/training_structural_model/2025-09-28_21-28-48_bbox_pretrained/snapshots/epoch-2000.pth.tar", map_location=self.device
         #     )["model"]
         # )
         # self.perceptual_loss = LPIPS()
@@ -222,7 +209,9 @@ class Trainer(EpochBasedTrainer):
             frame_ids = frame_ids[:60]
         if len(frame_ids) >= B:
             fids = random.sample(frame_ids, B)
-        else: fids = ['000000', '000000', '000000', '000000']
+        else: 
+            for b in range(B):
+                fids.append('000000')
         
         # fids = ['000009', '000009', '000009', '000009', '000009', '000009']
         return fids
@@ -236,7 +225,7 @@ class Trainer(EpochBasedTrainer):
         
     # def _make_batch(self, data_dict: Dict[str, Any]):
     #     # B = len(data_dict["scene_graphs"]["scene_ids"])
-    #     B = 6
+    #     B = 8
     #     frames_all = data_dict["scene_graphs"].get("obj_img_top_frames", {})
     #     scene_ids = data_dict["scene_graphs"]["scene_ids"]
     #     scene_id = scene_ids[0][0]
@@ -275,7 +264,6 @@ class Trainer(EpochBasedTrainer):
         sg = data_dict["scene_graphs"]
         scene_ids_arr = sg["scene_ids"]
         scene_ids = [sid[0] for sid in scene_ids_arr]
-        frame_ids_seq = sg.get("frame_ids")
         image_frames = sg.get("image_frames", {})
         G = self.G
 
@@ -284,18 +272,13 @@ class Trainer(EpochBasedTrainer):
         mean_gt_list, scale_gt_list = [], []
         mean_seed0_list, scale_seed0_list = [], []
 
-        for idx, sid in enumerate(scene_ids):
-            if frame_ids_seq is not None and idx < len(frame_ids_seq):
-                fid = str(frame_ids_seq[idx])
+        for sid in scene_ids:
+            frames = image_frames.get(sid, [])
+            if frames:
+                fid = random.choice(frames)
             else:
-                frames = image_frames.get(sid, [])
-                if frames:
-                    fid = str(frames[0])
-                else:
-                    frame_ids = scan3r.load_frame_idxs(
-                        osp.join(self.cfg.data.root_dir, "scenes"), sid
-                    )
-                    fid = frame_ids[0] if frame_ids else "000000"
+                frame_ids = scan3r.load_frame_idxs(osp.join(self.cfg.data.root_dir, "scenes"), sid)
+                fid = frame_ids[0] if frame_ids else "000000"
 
             pack = self._load_aligned_pack(self.root_dir, sid, fid)
             occ_gt, seed_idx, feats, mean_gt, scale_gt, mean_seed0, scale_seed0 = \
@@ -316,7 +299,6 @@ class Trainer(EpochBasedTrainer):
         scale_seed0 = torch.cat(scale_seed0_list, 0).to(self.device)        # (B,1)
 
         return occ_gt, seed_idx_list, feats_list, mean_gt, scale_gt, mean_seed0, scale_seed0
-
     
     def scatter_voxel_mean(self, idx_t: torch.Tensor, feat_t: torch.Tensor, G: int):
         """
@@ -370,89 +352,6 @@ class Trainer(EpochBasedTrainer):
         scale_seed0 = torch.tensor(float(pack["seed_box_init_scale"]), dtype=torch.float32).view(1)
 
         return occ_gt, seed_idx, feats, mean_gt, scale_gt, mean_seed0, scale_seed0
-    
-    def _empty_flow_cond_tokens(self, G: int, patch_size: int, feat_dim: int) -> torch.Tensor:
-        gp = G // max(1, patch_size)
-        target_L = max(1, min(self.flow_cond_max_ctx, gp * gp * gp))
-        return torch.zeros(1, target_L, feat_dim, device=self.device, dtype=torch.float16)
-
-    def _build_flow_cond_tokens(
-        self,
-        idx: torch.Tensor,
-        feats: torch.Tensor,
-        G: int,
-        patch_size: int,
-    ) -> torch.Tensor:
-        """
-        Build (1, Lctx, feat_dim) conditioning tokens for the flow using remapped seeds.
-        Aggregates per patch, keeps the densest patches and pads/truncates to a fixed context.
-        """
-        feat_dim = feats.shape[-1] if feats is not None and feats.numel() else 1024
-        if (
-            idx is None
-            or feats is None
-            or idx.numel() == 0
-            or feats.numel() == 0
-        ):
-            return self._empty_flow_cond_tokens(G, patch_size, feat_dim)
-
-        patch = max(1, patch_size)
-        seeds = idx.detach().cpu().long()
-        feats_cpu = feats.detach().cpu().float()
-
-        gp = max(1, G // patch)
-        Lq = gp * gp * gp
-        target_L = max(1, min(self.flow_cond_max_ctx, Lq))
-
-        patch_coords = (seeds // patch).clamp(min=0, max=gp - 1)
-        patch_id = (
-            patch_coords[:, 0] * gp * gp
-            + patch_coords[:, 1] * gp
-            + patch_coords[:, 2]
-        )
-
-        sum_feats = torch.zeros(Lq, feat_dim, dtype=feats_cpu.dtype)
-        sum_feats.index_add_(0, patch_id, feats_cpu)
-        counts = torch.zeros(Lq, 1, dtype=feats_cpu.dtype)
-        counts.index_add_(
-            0, patch_id, torch.ones_like(patch_id, dtype=feats_cpu.dtype).unsqueeze(1)
-        )
-
-        non_empty = counts.squeeze(1) > 0
-        if non_empty.sum() == 0:
-            return self._empty_flow_cond_tokens(G, patch_size, feat_dim)
-
-        sum_feats = sum_feats[non_empty]
-        counts = counts[non_empty]
-        cond_tokens = sum_feats / counts.clamp_min(1.0)
-        counts_1d = counts.squeeze(1)
-
-        num_tokens = cond_tokens.shape[0]
-        if num_tokens >= target_L:
-            rand_fill = int(min(self.flow_cond_rand_fill, target_L))
-            top_keep = max(target_L - rand_fill, 0)
-            selected: List[torch.Tensor] = []
-            if top_keep > 0:
-                topk_idx = torch.topk(counts_1d, k=top_keep, largest=True).indices
-                selected.append(topk_idx)
-            if rand_fill > 0:
-                mask = torch.ones(num_tokens, dtype=torch.bool)
-                if top_keep > 0:
-                    mask[topk_idx] = False
-                remaining_idx = torch.arange(num_tokens)[mask]
-                if remaining_idx.numel() > 0:
-                    perm = torch.randperm(remaining_idx.numel())[:rand_fill]
-                    selected.append(remaining_idx[perm])
-            sel_idx = torch.cat(selected, dim=0) if selected else torch.arange(target_L)
-            cond_tokens = cond_tokens[sel_idx]
-        else:
-            pad = target_L - num_tokens
-            if pad > 0:
-                pad_tokens = torch.zeros(pad, feat_dim, dtype=cond_tokens.dtype)
-                cond_tokens = torch.cat([cond_tokens, pad_tokens], dim=0)
-
-        cond_tokens = cond_tokens.to(device=self.device, dtype=torch.float16)
-        return cond_tokens.unsqueeze(0)
 
     def _kld(self, mu, logvar):
         return -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
@@ -470,79 +369,6 @@ class Trainer(EpochBasedTrainer):
         # centers: (M,3) in [-0.5,0.5] -> (M,3) int clipped
         idx = torch.floor((centers + 0.5) * G).long()
         return torch.clamp(idx, 0, G - 1)
-
-    def _compute_mean_iou(
-        self, probs: torch.Tensor, gt: torch.Tensor, thresholds=(0.3, 0.5, 0.7)
-    ) -> Dict[float, torch.Tensor]:
-        metrics: Dict[float, torch.Tensor] = {}
-        gt_bin = (gt > 0.5).float()
-        for thr in thresholds:
-            pr = (probs >= thr).float()
-            inter = (pr * gt_bin).sum(dim=(1, 2, 3, 4))
-            union = pr.sum(dim=(1, 2, 3, 4)) + gt_bin.sum(dim=(1, 2, 3, 4)) - inter
-            metrics[thr] = (inter / (union + 1e-6)).mean()
-        return metrics
-
-    def _sample_latents_with_flow(
-        self, cond_tokens: torch.Tensor, latent_shape: Tuple[int, ...]
-    ) -> torch.Tensor:
-        steps = max(1, int(self.flow_sampling_steps))
-        B = cond_tokens.shape[0]
-        z = torch.randn(latent_shape, device=self.device, dtype=torch.float32)
-        t_vals = torch.linspace(1.0, 0.0, steps + 1, device=self.device)
-        for s in range(steps):
-            t_curr = t_vals[s]
-            dt = t_vals[s + 1] - t_curr
-            t_batch = torch.full((B,), t_curr, device=self.device, dtype=torch.float32)
-            with torch.amp.autocast('cuda', enabled=True, dtype=torch.float16):
-                v = self.model.flow(z, t_batch, cond_tokens)
-            z = z + v.float() * dt
-        return z
-    
-    def focal_bce_with_logits(
-        self,
-        logits: torch.Tensor,
-        targets: torch.Tensor,
-        gamma: float = 2.0,
-        alpha= None,   # weight for positives (class=1)
-        mask= None,
-        reduction: str = "mean",
-        eps: float = 1e-6,
-    ) -> torch.Tensor:
-        """
-        Focal BCE on logits. Supports scalar or tensor alpha (broadcastable to logits).
-        logits:  any shape
-        targets: same shape, {0,1} (or [0,1] soft labels)
-        mask:    same shape (1 keeps, 0 ignores)
-        """
-        # Standard BCE (stable, on logits)
-        ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-
-        # p_t = p if y=1 else (1-p), computed stably
-        p = torch.sigmoid(logits)
-        p_t = p * targets + (1.0 - p) * (1.0 - targets)
-
-        # (1 - p_t)^gamma
-        mod = (1.0 - p_t).clamp_min(eps).pow(gamma)
-
-        if alpha is not None:
-            # alpha is weight for positives; build alpha_t that matches targets
-            # alpha can be a scalar or broadcastable tensor (e.g., (B,1,1,1,1))
-            alpha_t = targets * alpha + (1.0 - targets) * (1.0 - alpha)
-            loss = alpha_t * mod * ce
-        else:
-            loss = mod * ce
-
-        if mask is not None:
-            loss = loss * mask
-
-        if reduction == "mean":
-            denom = (mask.sum() if mask is not None else torch.numel(loss)).clamp_min(1.0)
-            return loss.sum() / denom
-        elif reduction == "sum":
-            return loss.sum()
-        else:
-            return loss
 
     def _remap_seed_idx_with_bbox(
         self,
@@ -624,208 +450,77 @@ class Trainer(EpochBasedTrainer):
         # occ_gt, occ_vis = self._make_batch(data_dict)
         occ_gt, seed_idx_list, feats_list, mean_gt, scale_gt, mean_seed0, scale_seed0 = self._make_batch(data_dict)
         B, _, G, _, _ = occ_gt.shape
-        flow_enabled = self.has_flow
         
-        feats_comp_list, idx_t_list, raw_feats_list = [], [], []
+        feats_comp_list, idx_t_list = [], []
         for b in range(B):
             idx_np   = seed_idx_list[b]
             feats_np = feats_list[b]
             idx_t    = torch.from_numpy(idx_np).to(self.device).long()       # (Mb,3)
-            feats_raw = torch.from_numpy(feats_np).float()
-            feats_t  = feats_raw.to(self.device)    # (Mb,1024)
+            feats_t  = torch.from_numpy(feats_np).to(self.device).float()    # (Mb,1024)
             with torch.amp.autocast('cuda', enabled=True, dtype=torch.float16):
                 feats_comp = self.model.comp(feats_t).float()                # (Mb,64) -> fp32 for bbox
             feats_comp_list.append(feats_comp)
             idx_t_list.append(idx_t)
-            raw_feats_list.append(feats_raw)
 
         # 2) Batched bbox (decoupled from encoder)
-        # mean_pred, scale_pred = self.model.forward_bbox_from_seeds_batch(
-        #     feats_comp_list=feats_comp_list,   # list[(Mi,64)]
-        #     idx_list=idx_t_list,               # list[(Mi,3)]
-        #     G=self.G,
-        #     mean_seed0=mean_seed0,             # (B,3)
-        #     scale_seed0=scale_seed0            # (B,1)
-        # )
+        mean_pred, scale_pred = self.model.forward_bbox_from_seeds_batch(
+            feats_comp_list=feats_comp_list,   # list[(Mi,64)]
+            idx_list=idx_t_list,               # list[(Mi,3)]
+            G=self.G,
+            mean_seed0=mean_seed0,             # (B,3)
+            scale_seed0=scale_seed0            # (B,1)
+        )
         
-        # L_box_mean  = F.l1_loss(mean_pred, mean_gt, reduction='mean')
-        # L_box_scale = F.l1_loss(torch.log(scale_pred.clamp_min(1e-6)),
-        #                         torch.log(scale_gt.view(B).clamp_min(1e-6)), reduction='mean')
-        # L_box = L_box_mean + L_box_scale
+        L_box_mean  = F.l1_loss(mean_pred, mean_gt, reduction='mean')
+        L_box_scale = F.l1_loss(torch.log(scale_pred.clamp_min(1e-6)),
+                                torch.log(scale_gt.view(B).clamp_min(1e-6)), reduction='mean')
+        L_box = L_box_mean + L_box_scale
         
         # -----------------------------------------------------------------------------------------
         # mean_dst, scale_dst = mean_pred.detach(), scale_pred.detach().view(B,1)
-        mean_dst, scale_dst = mean_gt, scale_gt
-        recon_w = self.recon_weight_after_warmup
-        occ_gt_aligned = self.remap_occ(
-                                        occ_src=occ_gt,
-                                        mean_src=mean_gt,               scale_src=scale_gt.view(B,1),
-                                        # mean_dst=mean_pred.detach(),    scale_dst=scale_pred.detach().view(B,1),
-                                        mean_dst=mean_gt,               scale_dst = scale_gt.view(B,1),
-                                        G=self.G
-                                    )
-        x_dst_list, occ_dst_seed_list = [], []
-        cond_tok_list = [] if flow_enabled else None
-        for b in range(B):
-            idx_dst = self._remap_seed_idx_with_bbox(
-                seed_idx=idx_t_list[b],     # (Mi,3) in seed canonical
-                mean_src=mean_seed0, scale_src=scale_seed0,
-                mean_dst=mean_dst, scale_dst=scale_dst,
-                b=b, G=self.G
-            )
-            grid_dino_dst, seed_occ_dst = self.scatter_voxel_mean(idx_dst.int(), feats_comp_list[b], self.G)
-            x_dst = torch.cat([seed_occ_dst, grid_dino_dst], dim=1)         # (1,65,G,G,G)
-            x_dst_list.append(x_dst); occ_dst_seed_list.append(seed_occ_dst)
-            if flow_enabled and cond_tok_list is not None:
-                cond_tok = self._build_flow_cond_tokens(
-                    idx_dst, raw_feats_list[b], self.G, self.flow_patch_size
-                )
-                cond_tok_list.append(cond_tok)
+        # # mean_dst, scale_dst = mean_gt, scale_gt
+        # recon_w = self.recon_weight_after_warmup
+        # occ_gt_aligned = self.remap_occ(
+        #                                 occ_src=occ_gt,
+        #                                 mean_src=mean_gt,               scale_src=scale_gt.view(B,1),
+        #                                 mean_dst=mean_pred.detach(),    scale_dst=scale_pred.detach().view(B,1),
+        #                                 G=self.G
+        #                             )
+        # x_dst_list, occ_dst_seed_list = [], []
+        # for b in range(B):
+        #     idx_dst = self._remap_seed_idx_with_bbox(
+        #         seed_idx=idx_t_list[b],     # (Mi,3) in seed canonical
+        #         mean_src=mean_seed0, scale_src=scale_seed0,
+        #         mean_dst=mean_dst, scale_dst=scale_dst,
+        #         b=b, G=self.G
+        #     )
+        #     grid_dino_dst, seed_occ_dst = self.scatter_voxel_mean(idx_dst.int(), feats_comp_list[b], self.G)
+        #     x_dst = torch.cat([seed_occ_dst, grid_dino_dst], dim=1)         # (1,65,G,G,G)
+        #     x_dst_list.append(x_dst); occ_dst_seed_list.append(seed_occ_dst)
 
-        x_in   = torch.cat(x_dst_list,        dim=0)  # (B,65,G,G,G)  -> structure input
-        occ_vis= torch.cat(occ_dst_seed_list, dim=0)  # (B,1,G,G,G)  -> mask for completion
-        cond_tokens = None
-        if flow_enabled and cond_tok_list is not None:
-            if cond_tok_list:
-                cond_tokens = torch.cat(cond_tok_list, dim=0)
-            else:
-                feat_dim = raw_feats_list[0].shape[-1] if raw_feats_list else 1024
-                cond_tokens = self._empty_flow_cond_tokens(self.G, self.flow_patch_size, feat_dim)
+        # x_in   = torch.cat(x_dst_list,        dim=0)  # (B,65,G,G,G)  -> structure input
+        # occ_vis= torch.cat(occ_dst_seed_list, dim=0)  # (B,1,G,G,G)  -> mask for completion
 
-        # # 4) Structure path (unchanged)
-        with torch.amp.autocast('cuda', enabled=False):
-            z, mu, logvar, feat3d = self.model.encoder(x_in, sample_posterior=False, return_raw=True, return_feat=True)
-            # z_data = self._reparameterize(mu, logvar)
-            z_data = mu
-            # logits = self.model.decoder(z_data)
-            logits = self.model.decoder(z)
-
-        sample_logits = None
-        sample_iou_metrics: Dict[float, torch.Tensor] = {}
-        if (
-            self.enable_flow_sampling
-            and flow_enabled
-            and cond_tokens is not None
-        ):
-            with torch.no_grad():
-                B_samp = min(self.flow_sampling_batch, cond_tokens.shape[0])
-                if B_samp > 0:
-                    cond_samp = cond_tokens[:B_samp]
-                    latent_shape = (B_samp,) + tuple(z_data.shape[1:])
-                    sample_latent = self._sample_latents_with_flow(cond_samp, latent_shape)
-                    sample_logits = self.model.decoder(sample_latent)
-                    sample_probs = torch.sigmoid(sample_logits)
-                    sample_gt = occ_gt_aligned[:B_samp].float()
-                    sample_iou_metrics = self._compute_mean_iou(sample_probs, sample_gt)
-        # losses (safe BCE)
+        # # # 4) Structure path (unchanged)
+        # with torch.amp.autocast('cuda', enabled=False):
+        #     z, mu, logvar, feat3d = self.model.encoder(x_in, sample_posterior=False, return_raw=True, return_feat=True)
+        #     z_data = self._reparameterize(mu, logvar)
+        #     logits = self.model.decoder(z_data)
+        #     # logits = self.model.decoder(z)
+        # # losses (safe BCE)
         # logits32 = torch.clamp(logits.float(), -30.0, 30.0)
-        logits32 = logits.float()
-        # occ_gt32 = occ_gt.float(); occ_vis32 = occ_vis.float()
-        occ_gt32 = occ_gt_aligned.float(); occ_vis32 = occ_vis.float()
-        # mask_complete = (occ_vis32 < 0.5).float()
-
-        # ----------blending mask_complete ---------------#
-        # mask_complete = (1 - occ_vis) + 0.1 * occ_vis
-        base = (1 - occ_vis)
-        band = (F.max_pool3d(occ_vis, 3, 1, 1) - occ_vis).clamp_min(0)
-        mask_complete = base + 0.3*band
-        
-        masked_voxels = mask_complete.sum()
-        if masked_voxels.item() < 1:
-            mask_complete = torch.ones_like(mask_complete)
-            masked_voxels = mask_complete.sum()
-
-        pos = (occ_gt32 * mask_complete).sum()
-        neg = ((1 - occ_gt32) * mask_complete).sum()
-        pw  = (neg / (pos + 1e-6)).clamp_(2.0, 8.0)   # cap to avoid huge weights but allow stronger balancing
-        # -----------------------------original bce------------------------------------#
-        # bce = F.binary_cross_entropy_with_logits(
-        #     logits32, occ_gt32, reduction='none', pos_weight=pw
-        # )
-        # vae_rec = (bce * mask_complete).sum() / (masked_voxels + 1e-6)
-        # ------------------------------------------------------------------------------
-
-        #-------------------------------focal bce--------------------------------------#
-        probs = torch.sigmoid(logits32)
-        gt    = (occ_gt32 > 0.5).float()
-
-        # (optional) per-sample alpha for positives, based on class frequency under the mask
-        with torch.no_grad():
-            pos = (gt * mask_complete).flatten(1).sum(1)
-            neg = ((1 - gt) * mask_complete).flatten(1).sum(1)
-
-            self.logger.info(f"alpha_pos_befor_clamping: {(neg / (pos + neg + 1e-6))}")
-            alpha_pos = (neg / (pos + neg + 1e-6)).clamp(0.05, 0.95)  # more imbalance -> alpha→1
-            # alpha_pos = (neg / (pos + neg + 1e-6)).clamp(0.05, 0.99)
-            # reshape to broadcast over voxels
-            alpha_b = alpha_pos.view(-1, 1, 1, 1, 1)
-        vae_rec = self.focal_bce_with_logits(
-                    logits32, gt,
-                    gamma=2.0,                 # start with 2.0
-                    alpha=alpha_b,             # or use a fixed scalar like 0.75 if you prefer
-                    mask=mask_complete,
-                    reduction="mean",
-                )
-
-        # adding a dice loss
-        # eps = 1e-6
-        # probs = torch.sigmoid(logits32)
-        # gt    = (occ_gt32 > 0.5).float()
-        # probs_masked = probs * mask_complete
-        # gt_masked    = gt    * mask_complete
-        # inter = (probs_masked * gt_masked).sum(dim=(1,2,3,4))
-        # pred = probs_masked.sum(dim=(1,2,3,4))
-        # target = gt_masked.sum(dim=(1,2,3,4))
-        # dice = 1.0 - (2.0 * inter + eps) / (pred + target + eps)
-        # dice_loss = dice.mean()
-        
-        
-        # Tversky
-        # alpha, beta = 0.7, 0.3   # penalize FN more (increase recall), swap if you need precision
-        # Swapping tversky
-        tau = 2.0
-        probs_dice = torch.sigmoid(logits32 / tau)
-        alpha, beta = 0.3, 0.7
-        P = probs_dice*mask_complete; G = gt*mask_complete
-        TP = (P*G).sum((1,2,3,4))
-        FP = (P*(1-G)).sum((1,2,3,4))
-        FN = ((1-P)*G).sum((1,2,3,4))
-        # tversky = 1 - (TP + 1e-6) / (TP + alpha*FP + beta*FN + 1e-6)
-
-        # ------exp tver----------#
-        tver = (TP + 1e-6) / (TP + alpha*FP + beta*FN + 1e-6)
-        gamma_t = 1.5
-        dice_loss = (1.0 - tver).pow(gamma_t).mean()
-
-
-
-        # dice_loss = tversky.mean()
-
-        
+        # # occ_gt32 = occ_gt.float(); occ_vis32 = occ_vis.float()
+        # occ_gt32 = occ_gt_aligned.float(); occ_vis32 = occ_vis.float()
+        # # mask_complete = (occ_vis32 == 0).float()
+        # mask_complete = torch.ones_like(occ_gt32)
+        # bce = F.binary_cross_entropy_with_logits(logits32, occ_gt32, reduction='none')
+        # vae_rec = (bce * mask_complete).sum() / (mask_complete.sum() + 1e-6)
+        # # vae_rec = bce
         # vae_kld = self._kld(mu.float(), logvar.float())
-       
-        # loss = recon_w * vae_rec + 1e-3 * recon_w * vae_kld + 0.5 * L_box
-        # loss = recon_w * vae_rec 
-        lambda_dice = 1
-        flow_loss = torch.tensor(0.0, device=self.device)
-        if flow_enabled and cond_tokens is not None:
-            Bz = z_data.shape[0]
-            t = torch.rand(Bz, device=self.device)
-            eps = torch.randn_like(z_data)
-            zt = (1 - t).view(Bz, 1, 1, 1, 1) * z_data + t.view(Bz, 1, 1, 1, 1) * eps
-            v_target = (z_data - eps).detach()
-            cond_tokens = cond_tokens.to(device=self.device, dtype=torch.float16)
-            with torch.amp.autocast('cuda', enabled=True, dtype=torch.float16):
-                v_pred = self.model.flow(zt, t, cond_tokens)
-            flow_loss = F.mse_loss(v_pred.float(), v_target.float())
-        loss = recon_w * (vae_rec  + lambda_dice * dice_loss) + self.flow_loss_weight * flow_loss
-        with torch.no_grad():
-            probs = torch.sigmoid(logits32)                 # (B,1,G,G,G)
-            iou_metrics = self._compute_mean_iou(probs, occ_gt32)
-            iou_03 = iou_metrics[0.3]
-            iou_05 = iou_metrics[0.5]
-            iou_07 = iou_metrics[0.7]
-       
+        # print("vae_rec before loss calculation: ", vae_rec)
+        # loss = recon_w * vae_rec + 1e-3 * recon_w * vae_kld + L_box
+        # loss = recon_w * vae_rec + 1e-3 * recon_w * vae_kld 
+        # print("vae_rec after loss calculation: ", vae_rec)
         # -----------------------------------------------------------------------------------------------
         
         
@@ -903,25 +598,17 @@ class Trainer(EpochBasedTrainer):
         
         # if epoch > self.bbox_warmup_epochs:
         # ----------------------------------------------------------------------------------------
-        loss_dict = {
-        "loss": loss * 10,
-        "vae_rec": vae_rec,
-        "dice_loss": dice_loss,
-        "flow_loss": flow_loss,
+        # loss_dict = {
+        # "loss": loss * 100,
+        # "vae_rec": vae_rec.detach().cpu(),
+        # "vae_kld": vae_kld,
         # "L_box": L_box,
         # "L_box_mean": L_box_mean,
         # "L_box_scale": L_box_scale,
-        # "L_seed": L_seed,
-        # "L_shrink": L_shrink,
+        # # "L_seed": L_seed,
+        # # "L_shrink": L_shrink,
         # "scale_pred": scale_pred.mean().detach().item(),
-        "IoU @ 0.3": iou_03.item(),
-        "IoU @ 0.5": iou_05.item(),
-        "IoU @ 0.7": iou_07.item(),
-        }
-        if sample_iou_metrics:
-            loss_dict["IoU_flow @ 0.3"] = sample_iou_metrics.get(0.3, torch.tensor(0.0)).item()
-            loss_dict["IoU_flow @ 0.5"] = sample_iou_metrics.get(0.5, torch.tensor(0.0)).item()
-            loss_dict["IoU_flow @ 0.7"] = sample_iou_metrics.get(0.7, torch.tensor(0.0)).item()
+        # }
         # else:
         #     loss_dict = {
         #     "loss": loss * 100,
@@ -933,32 +620,29 @@ class Trainer(EpochBasedTrainer):
         #     "scale_pred": scale_pred.mean().detach().item(),
         #     }
         
-        viz_B = min(logits.shape[0], 4)
-        output_dict = {
-            "logits": logits[:viz_B].detach().float().cpu(),   # (B,1,G,G,G)
-            "occ_gt": occ_gt_aligned[:viz_B].detach().float().cpu(),   # (B,1,G,G,G)
-            "occ_vis": occ_vis[:viz_B].detach().float().cpu(), 
-        }
+        # viz_B = min(logits.shape[0], 4)
+        # output_dict = {
+        #     "logits": logits[:viz_B].detach().float().cpu(),   # (B,1,G,G,G)
+        #     "occ_gt": occ_gt_aligned[:viz_B].detach().float().cpu(),   # (B,1,G,G,G)
+        #     "occ_vis": occ_vis[:viz_B].detach().float().cpu(), 
+        # }
         # # # if flow_logits_viz is not None:
         # # #     # match visualize() key
         
-        if sample_logits is not None:
-            output_dict["sample_logits"] = sample_logits[:viz_B].detach().float().cpu()
-        else:
-            output_dict["sample_logits"] = None  # (≤2,1,G,G,G)
-        # ------------------------------------------------------------------------------------
-        # loss = (
-        #      L_box
-        # )
-        # output_dict = {}
         # output_dict["sample_logits"] = None  # (≤2,1,G,G,G)
-        # loss_dict = {
-        # "loss": loss * 100,
-        # "L_box": L_box,
-        # "L_box_mean": L_box_mean,
-        # "L_box_scale": L_box_scale,
-        # "scale_pred": scale_pred.mean().detach().item(),
-        # }
+        # ------------------------------------------------------------------------------------
+        loss = (
+             L_box
+        )
+        output_dict = {}
+        output_dict["sample_logits"] = None  # (≤2,1,G,G,G)
+        loss_dict = {
+        "loss": loss * 100,
+        "L_box": L_box,
+        "L_box_mean": L_box_mean,
+        "L_box_scale": L_box_scale,
+        "scale_pred": scale_pred.mean().detach().item(),
+        }
         
         
         return output_dict, loss_dict
@@ -1013,96 +697,96 @@ class Trainer(EpochBasedTrainer):
         - Save slice mosaics (GT | PR) as a PNG and TensorBoard image.
         - (Optional) Save a sample from the flow as PLY/PNG for quick sanity.
         """
-        # if epoch > self.bbox_warmup_epochs:
-        # if (epoch % 20)!=0:
-        #     return
-        outdir = f"{self.cfg.output_dir}/events"
-        os.makedirs(outdir, exist_ok=True)
+        # # if epoch > self.bbox_warmup_epochs:
+        # # if (epoch % 20)!=0:
+        # #     return
+        # outdir = f"{self.cfg.output_dir}/events"
+        # os.makedirs(outdir, exist_ok=True)
         
-        # ---- unpack ----
-        logits_b11ggg: torch.Tensor = output_dict["logits"]        # (B,1,G,G,G)
-        gt_b11ggg: torch.Tensor     = output_dict["occ_gt"]        # (B,1,G,G,G) or (B,1,G,G,G) float
-        input_b11ggg: torch.Tensor  = output_dict["occ_vis"]
-        G: int                      = 64
-        thr: float                  = 0.5
-        B = logits_b11ggg.shape[0]
+        # # ---- unpack ----
+        # logits_b11ggg: torch.Tensor = output_dict["logits"]        # (B,1,G,G,G)
+        # gt_b11ggg: torch.Tensor     = output_dict["occ_gt"]        # (B,1,G,G,G) or (B,1,G,G,G) float
+        # input_b11ggg: torch.Tensor  = output_dict["occ_vis"]
+        # G: int                      = 64
+        # thr: float                  = 0.5
+        # B = logits_b11ggg.shape[0]
         
-        sample_logits = output_dict.get("sample_logits", None)  # (B,1,G,G,G) or None
+        # sample_logits = output_dict.get("sample_logits", None)  # (B,1,G,G,G) or None
         
         
-        # ---- save first few items ----
-        max_items = min(4, B)
-        for i in range(max_items):
-            logits_1 = logits_b11ggg[i,0]               # (G,G,G)
-            gt_1     = gt_b11ggg[i,0]                   # (G,G,G)
-            input_1 = input_b11ggg[i,0]
+        # # ---- save first few items ----
+        # max_items = min(4, B)
+        # for i in range(max_items):
+        #     logits_1 = logits_b11ggg[i,0]               # (G,G,G)
+        #     gt_1     = gt_b11ggg[i,0]                   # (G,G,G)
+        #     input_1 = input_b11ggg[i,0]
 
-            # point clouds
-            pr_idx = (logits_1.sigmoid() > thr).nonzero(as_tuple=False)
-            gt_idx = (gt_1 > 0.5).nonzero(as_tuple=False)
-            input_idx = (input_1 > 0.5).nonzero(as_tuple=False)
-            save_vox_as_ply(gt_idx, G, f"{outdir}/{mode}_gt_struct_{i}_completion.ply")
-            save_vox_as_ply(pr_idx, G, f"{outdir}/{mode}_pred_struct_{i}_completion.ply")
-            save_vox_as_ply(input_idx, G, f"{outdir}/{mode}_input_struct_{i}_completion.ply")
-            # slice mosaic PNG
-            sbs = side_by_side(gt_1, logits_1, max_slices=6)  # (2,H,W)
-            save_image(sbs, f"{outdir}/{mode}_slices_{i}.png", normalize=True)
+        #     # point clouds
+        #     pr_idx = (logits_1.sigmoid() > thr).nonzero(as_tuple=False)
+        #     gt_idx = (gt_1 > 0.5).nonzero(as_tuple=False)
+        #     input_idx = (input_1 > 0.5).nonzero(as_tuple=False)
+        #     save_vox_as_ply(gt_idx, G, f"{outdir}/{mode}_gt_struct_{i}_completion.ply")
+        #     save_vox_as_ply(pr_idx, G, f"{outdir}/{mode}_pred_struct_{i}_completion.ply")
+        #     save_vox_as_ply(input_idx, G, f"{outdir}/{mode}_input_struct_{i}_completion.ply")
+        #     # slice mosaic PNG
+        #     sbs = side_by_side(gt_1, logits_1, max_slices=6)  # (2,H,W)
+        #     save_image(sbs, f"{outdir}/{mode}_slices_{i}.png", normalize=True)
 
-            # TensorBoard (channels-first: we’ll make it NCHW)
-            self.writer.add_image(
-                f"{mode}/slices_{i}_gt_pred",
-                sbs.unsqueeze(1),  # (2,1,H,W)
-                global_step=epoch,
-                dataformats="NCHW",
-            )
-        if sample_logits is not None:
-            for i in range(min(2, sample_logits.shape[0])):
-                sm = sample_logits[i,0]  # (G,G,G) logits or probs
-                sm_idx = (sm.sigmoid() > thr).nonzero(as_tuple=False)
-                save_vox_as_ply(sm_idx, G, f"{outdir}/{mode}_sample_struct_{i}.ply")
-                s = slice_mosaic(sm, max_slices=6)  # (1,H,W)
-                save_image(s, f"{outdir}/{mode}_sample_slices_{i}.png", normalize=True)
-                self.writer.add_image(
-                    f"{mode}/sample_slices_{i}",
-                    s.unsqueeze(0),   # (1,1,H,W)
-                    global_step=epoch,
-                    dataformats="NCHW",
-                )
+        #     # TensorBoard (channels-first: we’ll make it NCHW)
+        #     self.writer.add_image(
+        #         f"{mode}/slices_{i}_gt_pred",
+        #         sbs.unsqueeze(1),  # (2,1,H,W)
+        #         global_step=epoch,
+        #         dataformats="NCHW",
+        #     )
+        # if sample_logits is not None:
+        #     for i in range(min(2, sample_logits.shape[0])):
+        #         sm = sample_logits[i,0]  # (G,G,G) logits or probs
+        #         sm_idx = (sm.sigmoid() > thr).nonzero(as_tuple=False)
+        #         save_vox_as_ply(sm_idx, G, f"{outdir}/{mode}_sample_struct_{i}.ply")
+        #         s = slice_mosaic(sm, max_slices=6)  # (1,H,W)
+        #         save_image(s, f"{outdir}/{mode}_sample_slices_{i}.png", normalize=True)
+        #         self.writer.add_image(
+        #             f"{mode}/sample_slices_{i}",
+        #             s.unsqueeze(0),   # (1,1,H,W)
+        #             global_step=epoch,
+        #             dataformats="NCHW",
+        #         )
     
             
-        def _to_set(idx: torch.Tensor) -> set:
-            # idx: (K,3) long
-            if idx.numel() == 0:
-                return set()
-            return set(map(tuple, idx.cpu().numpy().astype(int).tolist()))
+        # def _to_set(idx: torch.Tensor) -> set:
+        #     # idx: (K,3) long
+        #     if idx.numel() == 0:
+        #         return set()
+        #     return set(map(tuple, idx.cpu().numpy().astype(int).tolist()))
 
-        for i in range(max_items):
-            logits_1 = logits_b11ggg[i, 0]  # (G,G,G), logits
-            gt_1     = gt_b11ggg[i, 0]      # (G,G,G), {0,1} or float in [0,1]
+        # for i in range(max_items):
+        #     logits_1 = logits_b11ggg[i, 0]  # (G,G,G), logits
+        #     gt_1     = gt_b11ggg[i, 0]      # (G,G,G), {0,1} or float in [0,1]
 
-            pr_idx = (logits_1.sigmoid() > thr).nonzero(as_tuple=False).long()  # (Mp,3)
-            gt_idx = (gt_1 > 0.5).nonzero(as_tuple=False).long()                # (Mg,3)
+        #     pr_idx = (logits_1.sigmoid() > thr).nonzero(as_tuple=False).long()  # (Mp,3)
+        #     gt_idx = (gt_1 > 0.5).nonzero(as_tuple=False).long()                # (Mg,3)
 
-            # --- metrics via sets ---
-            S_pr = _to_set(pr_idx)
-            S_gt = _to_set(gt_idx)
-            S_tp = S_pr & S_gt
-            S_fp = S_pr - S_gt
-            S_fn = S_gt - S_pr
+        #     # --- metrics via sets ---
+        #     S_pr = _to_set(pr_idx)
+        #     S_gt = _to_set(gt_idx)
+        #     S_tp = S_pr & S_gt
+        #     S_fp = S_pr - S_gt
+        #     S_fn = S_gt - S_pr
 
-            vox_pr = len(S_pr)
-            vox_gt = len(S_gt)
-            tp     = len(S_tp)
-            fp     = len(S_fp)
-            fn     = len(S_fn)
-            union  = tp + fp + fn
-            iou    = float(tp / (union + 1e-8))
-            same   = (fp == 0 and fn == 0)
+        #     vox_pr = len(S_pr)
+        #     vox_gt = len(S_gt)
+        #     tp     = len(S_tp)
+        #     fp     = len(S_fp)
+        #     fn     = len(S_fn)
+        #     union  = tp + fp + fn
+        #     iou    = float(tp / (union + 1e-8))
+        #     same   = (fp == 0 and fn == 0)
 
-            print(f"[viz] pred vox={vox_pr} gt vox={vox_gt} TP={tp} FP={fp} FN={fn} IoU={iou:.4f} all_equal={same}")
-        # else:
-        #     pass
-        # pass
+        #     print(f"[viz] pred vox={vox_pr} gt vox={vox_gt} TP={tp} FP={fp} FN={fn} IoU={iou:.4f} all_equal={same}")
+        # # else:
+        # #     pass
+        pass
 
 
 def parse_args(

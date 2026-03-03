@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from src.models.sparse_structure_flow import *
 from src.models.sparse_structure_vae import SparseStructureEncoder, SparseStructureDecoder
 from configs import AutoencoderConfig
-from src.models.cond_adapter import CondAdapter
+# from src.models.cond_adapter import CondAdapter
 from src.models.seed_bbox_head import SeedBBoxHead
 
 SCRATCH = os.environ.get("SCRATCH", "/scratch")
@@ -40,7 +40,10 @@ class StructureModel(nn.Module):
         cfg: AutoencoderConfig,
         device: str = "cuda",
         downsample: bool = False,
-        load_pretrained: bool = True,
+        load_pretrained: bool = False,
+        cond_feat_dim: Optional[int] = None,
+        occ_cond_feat_dim: Optional[int] = None,
+        flow_cond_dim: Optional[int] = None,
     ) -> None:
         super(StructureModel, self).__init__()
         self.cfg = cfg
@@ -50,7 +53,7 @@ class StructureModel(nn.Module):
         
         self.comp = DinoCompressor(d_in=1024, d_mid=256, d_out=64).to(device)
         self.seed_bbox = SeedBBoxHead(d_feat=64, use_coords=True).to(device)
-        C_out = 64
+        C_out = self.comp.mlp[-1].out_features
         # Instantiate Structure Encoder
         if load_pretrained:
             path = trellis_pipeline["args"]["models"]["sparse_structure_encoder"]
@@ -62,8 +65,8 @@ class StructureModel(nn.Module):
             self.encoder = self.encoder.to(device)
             
             # adjust encoder input layer
-            ch0 = self.encoder.channels[0]
-            self.encoder.input_layer = nn.Conv3d(1 + C_out, ch0, 3, padding=1).to(device)
+            # ch0 = self.encoder.channels[0]
+            # self.encoder.input_layer = nn.Conv3d(1 + C_out, ch0, 3, padding=1).to(device)
         else:
             self.encoder = SparseStructureEncoder(
                 in_channels = 1,
@@ -74,7 +77,7 @@ class StructureModel(nn.Module):
                 use_fp16 = True
             ).to(device)
             ch0 = self.encoder.channels[0]
-            self.encoder.input_layer = nn.Conv3d(1 + C_out, ch0, 3, padding=1).to(device)
+            # self.encoder.input_layer = nn.Conv3d(1 + C_out, ch0, 3, padding=1).to(device)
             
         # self.global_pool = nn.AdaptiveAvgPool3d(1).to(device) 
         # self.box_head = nn.Sequential(
@@ -104,6 +107,38 @@ class StructureModel(nn.Module):
                 channels=[512, 128, 32],
                 use_fp16=True                
             ).to(device)
+        
+        # Instantiate Flow
+        # if load_pretrained:
+        #     path = trellis_pipeline["args"]["models"]["sparse_structure_flow_model"]
+        #     with open(f"{SCRATCH}/TRELLIS-image-large/{path}.json", "r") as f:
+        #         configs = json.load(f)
+        #     state_dict = load_file(f"{SCRATCH}/TRELLIS-image-large/{path}.safetensors")
+        #     self.flow = SparseStructureFlowModel(**configs["args"])
+        #     self.flow.load_state_dict(state_dict, strict=False)
+        #     self.flow = self.flow.to(device)
+        # else:
+        #     self.flow = SparseStructureFlowModel(
+        #         resolution=16,
+        #         in_channels=8,
+        #         out_channels=8,
+        #         model_channels=1024,
+        #         cond_channels=1024,
+        #         num_blocks=24,
+        #         num_heads=16,
+        #         mlp_ratio=4,
+        #         patch_size=1,
+        #         pe_mode='ape',
+        #         qk_rms_norm=True,
+        #         use_fp16=True
+        #     ).to(device)
+        # cond_out_dim = flow_cond_dim if flow_cond_dim is not None else getattr(self.flow, "cond_channels", None)
+        # self.cond_adapter: Optional[nn.Linear] = None
+        # self.occ_cond_adapter: Optional[nn.Linear] = None
+        # if cond_feat_dim is not None and cond_out_dim is not None:
+        #     self.cond_adapter = nn.Linear(cond_feat_dim, cond_out_dim).to(device)
+        # if occ_cond_feat_dim is not None and cond_out_dim is not None:
+        #     self.occ_cond_adapter = nn.Linear(occ_cond_feat_dim, cond_out_dim).to(device)
             
             
     def forward_bbox(self, feat_3d, mean_seed0, scale_seed0):
@@ -151,7 +186,8 @@ class StructureModel(nn.Module):
 
         dmean, dscale_raw = d[:, :3], d[:, 3:4]
         scale_base = scale_seed0.clamp_min(1e-6)          # (B,1)
-        scale_pred = scale_base * (1.0 + F.softplus(dscale_raw))
+        mult = torch.exp(torch.tanh(d[:, 3:4]))
+        # scale_pred = scale_base * (1.0 + F.softplus(dscale_raw))
+        scale_pred = scale_base * mult
         mean_pred  = mean_seed0 + dmean
         return mean_pred, scale_pred.view(-1)
-

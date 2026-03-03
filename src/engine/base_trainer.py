@@ -82,6 +82,8 @@ class BaseTrainer(abc.ABC):
         # training config
         self.training = True
         self.grad_acc_steps = grad_acc_steps
+        # self.grad_acc_steps = 10
+
         self.distributed = False
 
         self.timer = Timer()

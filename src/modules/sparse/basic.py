@@ -288,14 +288,14 @@ class SparseTensor:
 
         elif BACKEND == "spconv":
             dense = self.data.dense()
-            max_dim = 64
-            if dense.shape[-3] != max_dim:
+            min_dim = 64
+            if dense.shape[-3] < min_dim:
                 dense = torch.cat(
                     [
                         dense,
                         torch.zeros(
                             *dense.shape[:-3],
-                            max_dim - dense.shape[-3],
+                            min_dim - dense.shape[-3],
                             dense.shape[-2],
                             dense.shape[-1],
                             dtype=dense.dtype,
@@ -304,14 +304,14 @@ class SparseTensor:
                     ],
                     dim=-3,
                 )
-            if dense.shape[-2] != max_dim:
+            if dense.shape[-2] < min_dim:
                 dense = torch.cat(
                     [
                         dense,
                         torch.zeros(
                             *dense.shape[:-3],
                             dense.shape[-3],
-                            max_dim - dense.shape[-2],
+                            min_dim - dense.shape[-2],
                             dense.shape[-1],
                             dtype=dense.dtype,
                             device=dense.device,
@@ -319,7 +319,7 @@ class SparseTensor:
                     ],
                     dim=-2,
                 )
-            if dense.shape[-1] != max_dim:
+            if dense.shape[-1] < min_dim:
                 dense = torch.cat(
                     [
                         dense,
@@ -327,7 +327,7 @@ class SparseTensor:
                             *dense.shape[:-3],
                             dense.shape[-3],
                             dense.shape[-2],
-                            max_dim - dense.shape[-1],
+                            min_dim - dense.shape[-1],
                             dtype=dense.dtype,
                             device=dense.device,
                         ),

@@ -5,9 +5,22 @@ from typing import *
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
 
 from src.models.backbones.base import SparseTransformerBase
 from src.modules import sparse as sp
+_LOGGER = logging.getLogger(__name__)
+
+def _isbad(t):  # tiny helper
+    return (~torch.isfinite(t)).any().item()
+
+def _summarize(t: torch.Tensor, name: str) -> None:
+    bad = ~torch.isfinite(t)
+    M, C = t.shape
+    r0, c0 = bad.nonzero(as_tuple=False)[0].tolist() if bad.any().item() else (-1, -1)
+    _LOGGER.error("[%s] bad=%d/%d first=(row=%s,C=%s,val=%s)",
+                  name, int(bad.sum().item()), M*C, r0, c0,
+                  (t[r0, c0].item() if r0 >=0 else "n/a"))
 
 
 class SLatEncoder(SparseTransformerBase):
@@ -58,12 +71,26 @@ class SLatEncoder(SparseTransformerBase):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, sample_posterior=True, return_raw=False):
+        if _isbad(x.feats):
+            _summarize(x.feats, "enc.input")
+            raise RuntimeError("Non-finite in encoder input feats")
         h = super().forward(x)
 
         h = h.type(x.dtype)
+        if _isbad(h.feats):
+            _summarize(h.feats, "enc.after_backbone")
+            raise RuntimeError("Non-finite after encoder backbone")
 
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        if _isbad(h.feats):
+            _summarize(h.feats, "enc.after_layernorm")
+            raise RuntimeError("Non-finite after encoder LayerNorm")
+        
         h = self.out_layer(h)
+        if _isbad(h.feats):
+            _summarize(h.feats, "enc.after_out_linear")
+            raise RuntimeError("Non-finite after encoder out_layer")
+        
 
         # Sample from the posterior distribution
         mean, logvar = h.feats.chunk(2, dim=-1)

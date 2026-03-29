@@ -3,6 +3,7 @@ from argparse import Namespace
 import logging
 import os
 import time
+import random
 import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Tuple
 
@@ -159,7 +160,7 @@ class Trainer(EpochBasedTrainer):
             # model = LatentAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
             model = DualDecoderAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
 
-        state_dict = torch.load("pretrained/slat_pretrained.pth.tar", map_location=self.device)["model"]
+        state_dict = torch.load("/cluster/scratch/wangyih/overfitting_dataset/pretrained/slat_pretrained.pth.tar", map_location=self.device)["model"]
 
         # Load encoder
         encoder_dict = {
@@ -209,8 +210,15 @@ class Trainer(EpochBasedTrainer):
                 pose_idx = frames[scene_id][obj_id].index(frame_id)
                 extrinsics = img_poses[scene_id][obj_id][pose_idx]
                 return extrinsics
-            else:
-                raise ValueError(f"Frame {frame_id} not found in scene {scene_id}.")
+            # else:
+        raise ValueError(f"Frame {frame_id} not found in scene {scene_id}.")
+    def get_unique_frame_ids(self, frames, scene_id):
+        frame_id_set = {
+            frame_id
+            for obj_id in frames[scene_id]
+            for frame_id in frames[scene_id][obj_id]
+        }
+        return list(frame_id_set)
 
     def train_step(
         self, epoch: int, iteration: int, data_dict: Dict[str, Any]
@@ -225,7 +233,7 @@ class Trainer(EpochBasedTrainer):
         masks = data_dict["scene_graphs"]["obj_annos"]
         translations = data_dict["scene_graphs"]["mean_obj_splat"]
         scales = data_dict["scene_graphs"]["scale_obj_splat"]
-        held_out_idxs = data_dict["held_out_idxs"]
+        # held_out_idxs = data_dict["held_out_idxs"]
         # data_dict["scene_graphs"]["tot_obj_splat"] =  data_dict["scene_graphs"]["tot_obj_splat"][0]
         # with torch.no_grad():
         #     embedding = self.model.encode(data_dict)
@@ -247,15 +255,28 @@ class Trainer(EpochBasedTrainer):
         entropy_sum = torch.zeros(N, device=coords.device)
         entropy_count = torch.zeros(N, device=coords.device)      
         scene_id = scene_ids[0][0] 
-        for i in range(len(held_out_idxs[scene_id])):
+        # frame_ids = scan3r.load_frame_idxs(data_dir='/cluster/project/cvg/Shared_datasets/3RScan/scenes',scan_id = scene_id)
+        frame_ids=self.get_unique_frame_ids(frames, scene_id) 
+        
+        if len(frame_ids) > 10:
+            selected_frame_ids = random.sample(frame_ids, 10)
+        else:
+            selected_frame_ids = frame_ids
+            
+        extrinsics_frames = scan3r.load_frame_poses(
+            '/cluster/project/cvg/Shared_datasets/3RScan/', scene_id, tuple(selected_frame_ids), type="quat_trans"
+          
+        )
+        for i in range(len(selected_frame_ids)):
             # scene_id = scene_ids[0][0]
             # obj_id = obj_ids[i]
             intrinsics = intrinsic[scene_id]
             # pose_idx = np.random.randint(0, len(img_poses[scene_id][obj_id]))
             # frame_id = frames[scene_id][obj_id][pose_idx]
-            frame_id = held_out_idxs[scene_id][i]   
+            frame_id = selected_frame_ids[i]   
             # extrinsics = img_poses[scene_id][obj_id][pose_idx]
-            extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
+            # extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
+            extrinsics = extrinsics_frames[frame_id]
             image = Image.open(
                 f"{self.cfg.data.root_dir}/scenes/{scene_id}/sequence/frame-{frame_id}.color.jpg"
             )
@@ -290,7 +311,7 @@ class Trainer(EpochBasedTrainer):
         print(embedding.shape)
         print(scene_ids)
         # scene_splat = embedding
-        reconstruction = self.model.decode(scene_splat, use_complex_mask=use_complex)
+        reconstruction, _ = self.model.decode(scene_splat, use_complex_mask=use_complex)
         # reconstruction = self.model.decode(scene_splat)     
         # reconstruction = self.model.decode(scene_splat)
         predicted_images = []
@@ -313,15 +334,16 @@ class Trainer(EpochBasedTrainer):
         
         
         
-        for i in range(len(held_out_idxs[scene_id])):
+        for i in range(len(selected_frame_ids)):
             # scene_id = scene_ids[0][0]
             # obj_id = obj_ids[i]
             intrinsics = intrinsic[scene_id]
             # pose_idx = np.random.randint(0, len(img_poses[scene_id][obj_id]))
             # frame_id = frames[scene_id][obj_id][pose_idx]
-            frame_id = held_out_idxs[scene_id][i]   
+            frame_id = selected_frame_ids[i]   
             # extrinsics = img_poses[scene_id][obj_id][pose_idx]
-            extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
+            # extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
+            extrinsics = extrinsics_frames[frame_id]
             image = Image.open(
                 f"{self.cfg.data.root_dir}/scenes/{scene_id}/sequence/frame-{frame_id}.color.jpg"
             )

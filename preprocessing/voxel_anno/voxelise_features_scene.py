@@ -3,7 +3,7 @@ import logging
 import os
 import os.path as osp
 from argparse import ArgumentParser, Namespace
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import open3d as o3d
@@ -11,9 +11,9 @@ import torch
 import torch.nn.functional as F
 import utils3d
 import json
+import time 
 
 from PIL import Image
-from torchvision import transforms
 from tqdm import tqdm
 
 from configs import Config, update_configs
@@ -23,56 +23,46 @@ from utils import visualisation as vis
 
 _LOGGER = logging.getLogger(__name__)
 
-
-# def _get_dino_embedding(images: torch.Tensor) -> torch.Tensor:
-#     images = images.reshape(-1, 3, images.shape[-2], images.shape[-1]).cpu()
-#     inputs = transform(images).cuda()
-#     outputs = model(inputs, is_training=True)
-
-#     n_patch = 518 // 14
-#     bs = images.shape[0]
-#     patch_embeddings = (
-#         outputs["x_prenorm"][:, model.num_register_tokens + 1 :]
-#         .permute(0, 2, 1)
-#         .reshape(bs, 1024, n_patch, n_patch)
-#     )
-#     return patch_embeddings
-
 @torch.no_grad()
-def _get_dino_embedding(images: torch.Tensor):
+def _get_dino_embedding(
+    images: torch.Tensor, batch_size: int = 8, image_size: int = 518
+) -> torch.Tensor:
     """
-    images: (B,3,H,W) in [0,1]
-    returns:
-      emb:   (B, C, H_p, W_p)
-      sizes: (H_in, W_in, H_p, W_p)
+    images: (N,3,H,W) in [0,1]
+    Returns (N,C,Hp,Wp) patch embeddings from DINOv3.
     """
-    # preprocess with your transform
-    imgs = images.reshape(-1, 3, images.shape[-2], images.shape[-1]).cpu()
-    inp  = transform(imgs).cuda()         # (B,3,H_in,W_in)
+    if images.ndim != 4:
+        raise ValueError(f"Expected images shape (N,3,H,W), got {images.shape}")
+    if images.device.type != "cuda":
+        images = images.cuda(non_blocking=True)
 
+    imgs = F.interpolate(
+        images, size=(image_size, image_size), mode="bilinear", align_corners=False
+    )
+    mean = torch.tensor([0.485, 0.456, 0.406], device=imgs.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=imgs.device).view(1, 3, 1, 1)
+    imgs = (imgs - mean) / std
+
+    patches = []
     model.eval()
-    out = model(inp, is_training=True)    # dict with patch tokens
+    for start in range(0, imgs.shape[0], batch_size):
+        chunk = imgs[start : start + batch_size]
+        outputs = model.forward_features(chunk)
+        if "x_norm_patchtokens" in outputs:
+            tok = outputs["x_norm_patchtokens"]
+        elif "x_prenorm" in outputs:
+            reg = getattr(model, "num_register_tokens", 0)
+            tok = outputs["x_prenorm"][:, 1 + reg :, :]
+        else:
+            raise KeyError("DINOv3 features missing x_norm_patchtokens/x_prenorm")
+        n_patch = int(tok.shape[1] ** 0.5)
+        print("n_patch: ", n_patch)
+        if n_patch * n_patch != tok.shape[1]:
+            raise ValueError(f"Non-square patch grid: {tok.shape[1]} tokens")
+        tok = tok.transpose(1, 2).reshape(chunk.size(0), tok.shape[2], n_patch, n_patch)
+        patches.append(tok.detach().float())
+    return torch.cat(patches, dim=0)
 
-    # 1) take patch tokens directly (B, N, C)
-    if "x_norm_patchtokens" not in out:
-        # fallback if needed
-        reg = getattr(model, "num_register_tokens", 0)
-        tok = out["x_prenorm"][:, 1 + reg : ]         # (B, N, C)
-    else:
-        tok = out["x_norm_patchtokens"]               # (B, N, C)
-
-    # 2) compute patch grid from actual input + patch size
-    H_in, W_in = int(inp.shape[-2]), int(inp.shape[-1])
-    p = getattr(model, "patch_size", None)
-    if p is None and hasattr(model, "patch_embed") and hasattr(model.patch_embed, "patch_size"):
-        p = model.patch_embed.patch_size
-    p = int(p[0] if isinstance(p, (tuple, list)) else p)
-    H_p, W_p = H_in // p, W_in // p
-    assert tok.shape[1] == H_p * W_p, f"N={tok.shape[1]} != {H_p*W_p} (H_in={H_in}, W_in={W_in}, p={p})"
-
-    # 3) (B,N,C) -> (B,C,H_p,W_p)
-    emb = tok.permute(0, 2, 1).contiguous().view(tok.size(0), tok.size(2), H_p, W_p)
-    return emb, (H_in, W_in, H_p, W_p)
 
 def _save_featured_voxel(
     voxel: torch.Tensor, output_file: str = "voxel_output_dense.npz"
@@ -88,20 +78,83 @@ def _project_to_image(
     scale: torch.Tensor,
     extrinsics: torch.Tensor,
     intrinsics: torch.Tensor,
-    grid_size: tuple[int] = (64, 64, 64),
+    grid_size: tuple[int] = (128, 128, 128),
 ):
     voxel_size = 1.0 / grid_size[0]
-    voxel = voxel.float() * voxel_size
-    assert voxel.min() >= 0.0 and voxel.max() <= 1.0
+    # voxel = voxel.float() * voxel_size
+    voxel = ((voxel.float() + 0.5) * voxel_size) - 0.5
+    # assert voxel.min() >= 0.0 and voxel.max() <= 1.0
 
-    voxel = voxel * 2.0 - 1.0
-    assert voxel.min() >= -1.0 and voxel.max() <= 1.0
+    # voxel = voxel * 2.0 - 1.0
+    # assert voxel.min() >= -1.0 and voxel.max() <= 1.0
     # voxel = voxel * scale + mean
-    voxel = voxel * scale[None, :] + mean[None, :]
+    # voxel = voxel * scale[None, :] + mean[None, :]
+    voxel = voxel * (2.0 * scale[None, :]) + mean[None, :]
     uv = utils3d.torch.project_cv(
         voxel.float(), extrinsics.float(), intrinsics.float()
     )[0]
     return uv
+
+
+def _upright_angle_from_pose(pose: np.ndarray) -> float:
+    """
+    Estimate the in-plane rotation (deg) to align world +Z with image up.
+    Assumes pose is camera-to-world; uses OpenCV camera coords (x right, y down).
+    """
+    pose = np.asarray(pose).reshape(4, 4)
+    r_cw = pose[:3, :3]
+    r_wc = r_cw.T
+    up_w = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    up_cam = r_wc @ up_w
+    norm_xy = np.linalg.norm(up_cam[:2])
+    if norm_xy < 1e-6:
+        return 0.0
+    angle = np.degrees(np.arctan2(up_cam[0], -up_cam[1]))
+    return float(angle)
+
+
+def _rotate_images_batch(images: torch.Tensor, angles_deg: list[float]) -> torch.Tensor:
+    """
+    Rotate a batch of images by per-frame angles (CCW in image coords).
+    images: (N,3,H,W)
+    """
+    if images.numel() == 0 or len(angles_deg) == 0:
+        return images
+    device = images.device
+    angles = torch.tensor(angles_deg, device=device, dtype=images.dtype) * (np.pi / 180.0)
+    cos_t = torch.cos(angles)
+    sin_t = torch.sin(angles)
+    theta = torch.zeros((images.size(0), 2, 3), device=device, dtype=images.dtype)
+    theta[:, 0, 0] = cos_t
+    theta[:, 0, 1] = sin_t
+    theta[:, 1, 0] = -sin_t
+    theta[:, 1, 1] = cos_t
+    grid = F.affine_grid(theta, images.size(), align_corners=False)
+    return F.grid_sample(
+        images, grid, mode="bilinear", padding_mode="zeros", align_corners=False
+    )
+
+
+def _rotate_uvs_batch(
+    uv: torch.Tensor, angles_deg: list[float], width: float, height: float
+) -> torch.Tensor:
+    """
+    Rotate pixel coordinates (x,y) by per-frame angles (CCW in image coords).
+    uv: (Nimg, Npts, 2)
+    """
+    if uv.numel() == 0 or len(angles_deg) == 0:
+        return uv
+    device = uv.device
+    angles = torch.tensor(angles_deg, device=device, dtype=uv.dtype) * (np.pi / 180.0)
+    cos_t = torch.cos(angles)[:, None]
+    sin_t = torch.sin(angles)[:, None]
+    cx = (width - 1.0) * 0.5
+    cy = (height - 1.0) * 0.5
+    x = uv[..., 0] - cx
+    y = uv[..., 1] - cy
+    x_rot = cos_t * x + sin_t * y
+    y_rot = -sin_t * x + cos_t * y
+    return torch.stack([x_rot + cx, y_rot + cy], dim=-1)
 
 
 def _segment_mesh(
@@ -131,19 +184,20 @@ def _segment_mesh(
     return segmented_mesh
 
 
-def _dilate_voxels(voxel_grid: o3d.geometry.VoxelGrid) -> np.ndarray:
-    voxel_grid = np.array([voxel.grid_index for voxel in voxel_grid.get_voxels()])
-    # densify voxel grid
-    dilated_voxels = set()
-    directions = [d for d in itertools.product([-1, 0, 1], repeat=3) if d != (0, 0, 0)]
-    for v in voxel_grid:
-        dilated_voxels.add(tuple(v))
-        for d in directions:
-            neighbor = tuple(v + np.array(d))
-            if all(0 <= n < 64 for n in neighbor):
-                dilated_voxels.add(neighbor)
-    voxel_grid = np.array(list(set(dilated_voxels)))
-    return voxel_grid
+def _dilate_voxels(voxel_grid: o3d.geometry.VoxelGrid, G: int = 64, k: int = 3) -> np.ndarray:
+    """
+    Return (N,3) integer grid indices after dilation with a k^3 cube.
+    """
+    idx = np.array([v.grid_index for v in voxel_grid.get_voxels()], dtype=np.int64)
+    occ = torch.zeros((1,1,G,G,G), device="cuda", dtype=torch.uint8)
+    occ[0,0, idx[:,0], idx[:,1], idx[:,2]] = 1
+
+    # 3D max-pool == morphological dilation
+    # pad='same' with replicate padding
+    pad = k//2
+    occ = F.max_pool3d(occ.float(), kernel_size=k, stride=1, padding=pad)
+    occ = (occ > 0.5).squeeze().nonzero(as_tuple=False).detach().cpu().numpy()
+    return occ  # (N,3) in [0,G-1]
 
 
 def _normalize_segmented_mesh(segmented_mesh: o3d.geometry.TriangleMesh):
@@ -151,13 +205,189 @@ def _normalize_segmented_mesh(segmented_mesh: o3d.geometry.TriangleMesh):
     mean = vertices.mean(axis=0)
     vertices -= mean
     # scale = np.max(np.abs(vertices))
-    scale = np.max(np.abs(vertices), axis=0) 
-    scale[scale == 0] = 1.0
+    # scale = np.max(np.abs(vertices), axis=0) 
+    max_extent = np.max(np.abs(vertices))
+    scale = np.array([max_extent, max_extent, max_extent])
+    if max_extent == 0:
+        scale = np.array([1.0, 1.0, 1.0])
+        max_extent = 1.0
     vertices *= 1.0 / (2 * scale)
     vertices = np.clip(vertices, -0.5 + 1e-6, 0.5 - 1e-6)
     segmented_mesh.vertices = o3d.utility.Vector3dVector(vertices)
     return mean, scale
 
+def _normalize_segmented_mesh(segmented_mesh: o3d.geometry.TriangleMesh):
+    vertices = np.asarray(segmented_mesh.vertices)
+    mean = vertices.mean(axis=0)
+    vertices -= mean
+    # scale = np.max(np.abs(vertices))
+    scale = np.max(np.abs(vertices), axis=0) 
+    # max_extent = np.max(np.abs(vertices))
+    # scale = np.array([max_extent, max_extent, max_extent])
+    # if max_extent == 0:
+    #     scale = np.array([1.0, 1.0, 1.0])
+    #     max_extent = 1.0
+    vertices *= 1.0 / (2 * scale)
+    vertices = np.clip(vertices, -0.5 + 1e-6, 0.5 - 1e-6)
+    segmented_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    return mean, scale
+
+def _average_patchtokens_chunked(
+    patch_embeddings: torch.Tensor,
+    projection_normed: torch.Tensor,
+    projection_px: torch.Tensor,
+    image_size: tuple[int, int],
+    use_valid_mask: bool = True,
+    chunk_size: Optional[int] = None,
+    max_chunk_mb: int = 518,
+) -> torch.Tensor:
+    """
+    Sample and average patch tokens without materialising the full (Nimg,Npts,C) tensor.
+
+    Args:
+        patch_embeddings: (Nimg, C, Hp, Wp) DINO features on GPU.
+        projection_normed: (Nimg, Npts, 2) grid in [-1,1] on CPU.
+        projection_px: (Nimg, Npts, 2) grid in pixel coords for masking.
+        image_size: (W, H) original image size.
+        use_valid_mask: whether to mask projections outside the image bounds.
+        chunk_size: optional fixed number of frames per chunk. If None, it is
+            derived from `max_chunk_mb` so the intermediate tensor stays small.
+        max_chunk_mb: soft cap for the temporary chunk tensor size.
+
+    Returns:
+        torch.Tensor: (Npts, C) averaged features on CPU.
+    """
+
+    if patch_embeddings.ndim != 4:
+        raise ValueError(
+            f"Expected patch embeddings of shape (N,C,H,W), got {patch_embeddings.shape}"
+        )
+    if projection_normed.ndim != 3:
+        raise ValueError(
+            f"Expected projection grid of shape (N,Npts,2), got {projection_normed.shape}"
+        )
+
+    Nimg, C, _, _ = patch_embeddings.shape
+    Npts = projection_normed.shape[1]
+    if Nimg == 0 or Npts == 0:
+        return torch.zeros((Npts, C), dtype=torch.float32)
+
+    if chunk_size is None:
+        bytes_per_frame = Npts * C * patch_embeddings.element_size()
+        max_chunk_bytes = max_chunk_mb * 1024 * 1024
+        chunk_frames = max_chunk_bytes // max(bytes_per_frame, 1)
+        chunk_size = max(1, min(Nimg, int(chunk_frames)))
+    chunk_size = max(1, min(chunk_size, Nimg))
+
+    W, H = image_size
+    dtype = torch.float32
+    sum_valid = torch.zeros((Npts, C), dtype=dtype)
+    sum_counts = torch.zeros((Npts, 1), dtype=dtype)
+    sum_all = torch.zeros((Npts, C), dtype=dtype)
+    any_valid = not use_valid_mask
+
+    for start in range(0, Nimg, chunk_size):
+        end = min(start + chunk_size, Nimg)
+        emb_chunk = patch_embeddings[start:end]
+        grid_chunk = projection_normed[start:end].to(emb_chunk.device, non_blocking=True)
+        grid_chunk = grid_chunk.unsqueeze(1)
+        tokens = (
+            F.grid_sample(
+                emb_chunk,
+                grid_chunk,
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(2)
+            .permute(0, 2, 1)
+            .cpu()
+            .to(dtype)
+        )  # (chunk, Npts, C)
+
+        sum_all += tokens.sum(dim=0)
+
+        if use_valid_mask:
+            px = projection_px[start:end]
+            valid = (
+                (px[..., 0] >= 0)
+                & (px[..., 0] < W)
+                & (px[..., 1] >= 0)
+                & (px[..., 1] < H)
+            )
+            if valid.any():
+                any_valid = True
+            valid = valid.unsqueeze(-1).to(dtype)
+        else:
+            valid = torch.ones(tokens.shape[:2] + (1,), dtype=dtype)
+
+        masked = tokens * valid
+        sum_valid += masked.sum(dim=0)
+        sum_counts += valid.sum(dim=0)
+
+    if use_valid_mask and not any_valid:
+        return (sum_all / float(Nimg)).float()
+
+    denom = sum_counts.clamp_min(1.0)
+    return (sum_valid / denom).float()
+
+def voxelize_mesh_simple_dense(scene_mesh, G=64, n_rand=2, k_dilate=3, device="cuda"):
+    """
+    Minimal voxelizer:
+      - take vertices
+      - add edge midpoints + face centroids
+      - add a few random barycentric samples per face
+      - bin to voxel indices
+      - optional small 3D dilation for thickness
+    All coordinates are assumed normalized to [-0.5, 0.5].
+    """
+    V = np.asarray(scene_mesh.vertices, dtype=np.float32)
+    Fidx = np.asarray(scene_mesh.triangles, dtype=np.int32)
+    if Fidx.size == 0 or V.size == 0:
+        return np.zeros((0, 3), dtype=np.int64)
+
+    v0 = V[Fidx[:, 0]]
+    v1 = V[Fidx[:, 1]]
+    v2 = V[Fidx[:, 2]]
+
+    # Base points: vertices, edge midpoints, face centroids
+    mids01 = (v0 + v1) * 0.5
+    mids12 = (v1 + v2) * 0.5
+    mids20 = (v2 + v0) * 0.5
+    cents  = (v0 + v1 + v2) / 3.0
+
+    pts_list = [V, mids01, mids12, mids20, cents]
+
+    # A few random barycentric samples per face (very cheap)
+    if n_rand > 0:
+        u = np.random.rand(Fidx.shape[0], n_rand, 1).astype(np.float32)
+        v = np.random.rand(Fidx.shape[0], n_rand, 1).astype(np.float32)
+        swap = (u + v > 1).astype(np.float32)
+        u = u * (1 - swap) + (1 - u) * swap
+        v = v * (1 - swap) + (1 - v) * swap
+        w = 1.0 - u - v
+        # shape: (F, n_rand, 3)
+        tri = (u * v0[:, None, :] + v * v1[:, None, :] + w * v2[:, None, :]).reshape(-1, 3)
+        pts_list.append(tri)
+
+    pts = np.concatenate(pts_list, axis=0)  # (N,3)
+
+    # Quantize to voxel indices
+    eps = 1e-6
+    idx = np.floor((pts + 0.5 - eps) * G).astype(np.int32)
+    idx = np.clip(idx, 0, G - 1)
+    idx = np.unique(idx, axis=0)  # drop duplicates
+
+    # Optional: small morphological dilation on GPU (fast)
+    if k_dilate > 0 and idx.shape[0] > 0:
+        occ = torch.zeros((1, 1, G, G, G), device=device, dtype=torch.uint8)
+        occ[0, 0, idx[:, 0], idx[:, 1], idx[:, 2]] = 1
+        pad = k_dilate // 2
+        occ = F.max_pool3d(occ.float(), kernel_size=k_dilate, stride=1, padding=pad)
+        xyz = (occ > 0.5).nonzero(as_tuple=False)  # (N,5) with batch/channels dims
+        if xyz.numel() > 0:
+            idx = torch.stack([xyz[:, 2], xyz[:, 3], xyz[:, 4]], dim=1).detach().cpu().numpy()
+
+    return idx.astype(np.int64)
 
 @torch.no_grad()
 def voxelise_features(
@@ -175,51 +405,65 @@ def voxelise_features(
     """
 
     scenes_dir = osp.join(root_dir, "scenes")
-    frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
-    # frame_idxs, heldout_idxs = scan3r.load_frame_idxs_held_out(data_dir = scenes_dir, scan_id = scan_id, heldout_ratio=0.2)
+    # frame_idxs_raw = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
+    # # frame_idxs, heldout_idxs = scan3r.load_frame_idxs_held_out(data_dir = scenes_dir, scan_id = scan_id, heldout_ratio=0.2)
 
-    extrinsics = scan3r.load_frame_poses(
-        data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
-    )
-    intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
-    mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
+    # intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
+    # mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
+    # rendered =  []
+    # frame_idxs = []
+    sid = scan_id
+    ref_id = scans2ref[sid]   # build once from 3RScan.json, like in your Trainer
+    print("voxelization ref_id:", ref_id)
+    frame_idxs_raw = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=ref_id)
+    intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=ref_id)
+    mask = scan3r.load_masks(data_dir=root_dir, scan_id=ref_id)
     rendered =  []
-    for frame_id in frame_idxs:
-        path = f"{root_dir}/scenes/{scan_id}/sequence/frame-{frame_id}.color.jpg"
+    depths_list = []
+    frame_idxs = []
+    for frame_id in frame_idxs_raw:
+        path = f"{root_dir}/scenes/{ref_id}/sequence/frame-{frame_id}.color.jpg"
+        score = scan3r._laplacian_focus_score(path, 256)
+        # if score < 80:
+        #     continue
+        frame_idxs.append(frame_id)
         with Image.open(path) as img:
             arr = np.array(img)  # Load full data while file is open
         tensor = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
         rendered.append(tensor)
-        
+    if len(frame_idxs) == 0:
+        _LOGGER.warning(f"No frames passed focus filtering for {scan_id}, skipping.")
+        return
+    extrinsics = scan3r.load_frame_poses(
+        data_dir=root_dir, scan_id=ref_id, frame_idxs=frame_idxs
+    )
+    frame_angles = []
+    for frame_id in frame_idxs:
+        pose = extrinsics.get(frame_id)
+        frame_angles.append(_upright_angle_from_pose(pose) if pose is not None else 0.0)
     mesh = scan3r.load_ply_mesh(
         data_dir=scenes_dir,
-        scan_id=scan_id,
+        scan_id=ref_id,
         label_file_name="labels.instances.annotated.v2.ply",
     )
     annos = scan3r.load_ply_data(
         data_dir=scenes_dir,
-        scan_id=scan_id,
+        scan_id=ref_id,
         label_file_name="labels.instances.annotated.v2.ply",
     )["vertex"]["objectId"]
     object_ids = [int(obj["id"]) for obj in obj_data["objects"]]
     print("object_ids: ", object_ids)
     
-    scene_output_dir = osp.join(args.model_dir, "files", mode, scan_id, "scene_level")
+    scene_output_dir = osp.join(args.model_dir, "files", mode, scan_id, "scene_level_dinov2_128_reso")
     voxel_path = osp.join(scene_output_dir, "voxel_output_dense.npz")
     mean_scale_path=osp.join(scene_output_dir, "mean_scale_dense.npz")
-    if (
-            osp.exists(mean_scale_path)
-            and osp.exists(voxel_path)
-            and "arr_0" in np.load(voxel_path)
-            and not args.override
-        ):
-            _LOGGER.info(f"Skipping {scan_id} ")
-            return
+    
     try:
         
         # STEP 1: Segment the mesh
         # segmented_mesh = _segment_mesh(mesh, annos, obj_id, scan_id)
-        object_vertex_mask = annos > 0
+        object_vertex_mask = annos >= 0
+        # object_vertex_mask = np.isin(annos, object_ids)
         selected_vertices = np.where(object_vertex_mask)[0]
         faces = np.asarray(mesh.triangles)
         vertices = np.asarray(mesh.vertices)
@@ -233,16 +477,31 @@ def voxelise_features(
         scene_mesh.triangles = o3d.utility.Vector3iVector(remapped_faces)
         
         # STEP 2: Normalize to unit cube (-0.5, 0.5)
-        
+        t0 = time.time()
         mean, scale = _normalize_segmented_mesh(scene_mesh)
-        # STEP 3: Voxelise the mesh
-        voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
+        print(f"scene_id: {scan_id}, scale: {scale}")
+        # return
+        G = 128
+        # Fast surface sampling voxelizer: denser than vertices, much faster than full mesh voxelization.
+        voxel_grid = voxelize_mesh_simple_dense(
             scene_mesh,
-            1 / 64,
-            min_bound=(-0.5, -0.5, -0.5),
-            max_bound=(0.5, 0.5, 0.5),
+            G=G,
+            n_rand=0,  # increase for more surface coverage
+            k_dilate=0,
+            device="cuda" if torch.cuda.is_available() else "cpu",
         )
-        voxel_grid = _dilate_voxels(voxel_grid)
+        # voxel_grid = _dilate_voxels_idx(voxel_grid)
+        
+        _LOGGER.info(f"Step 2 normalization took {time.time()-t0:.2f}s"); t0 = time.time()
+        # STEP 3: Voxelise the mesh
+        # voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
+        #     scene_mesh,
+        #     1 / 64,
+        #     min_bound=(-0.5, -0.5, -0.5),
+        #     max_bound=(0.5, 0.5, 0.5),
+        # )
+        # voxel_grid = np.array([v.grid_index for v in voxel_grid.get_voxels()], dtype=np.int64)
+        _LOGGER.info(f"Step 3 voxelization took {time.time()-t0:.2f}s"); t0 = time.time()
 
         # STEP 4: Save mean and scale (Scene composition)
         if not args.dry_run:
@@ -250,15 +509,15 @@ def voxelise_features(
             np.savez(mean_scale_path, mean=mean, scale=scale)
             _LOGGER.info(f"Saved mean and scale to {mean_scale_path}")
 
-        if (
-            os.path.exists(voxel_path) and "arr_0" in np.load(voxel_path)
-        ) and not args.override:
-            _LOGGER.info(f"Skipping {scan_id}")
-            return
+        # if (
+        #     os.path.exists(voxel_path) and "arr_0" in np.load(voxel_path)
+        # ) and not args.override:
+        #     _LOGGER.info(f"Skipping {scan_id}")
+        #     return
 
         # STEP 5: Render the object
         pose_camera_to_world = [
-            np.linalg.inv(extrinsics[frame_idx]) for frame_idx in extrinsics
+            np.linalg.inv(extrinsics[frame_idx]) for frame_idx in frame_idxs
         ]
 
         masks = [mask[frame_id] for frame_id in frame_idxs]
@@ -274,7 +533,11 @@ def voxelise_features(
         rendered_obj = [
             r for i, r in enumerate(rendered_obj) if i not in idx_empty
         ][:150]
+        _LOGGER.info(f"Length of rendered_obj: {len(rendered_obj)}")
+        frame_angles = [a for i, a in enumerate(frame_angles) if i not in idx_empty][:150]
         rendered_obj = torch.stack(rendered_obj).float()
+        if args.upright_images:
+            rendered_obj = _rotate_images_batch(rendered_obj, frame_angles)
         pose_camera_to_world = [
             pose
             for i, pose in enumerate(pose_camera_to_world)
@@ -289,37 +552,46 @@ def voxelise_features(
             torch.Tensor(scale),
             torch.from_numpy(np.stack(pose_camera_to_world)),
             torch.from_numpy(intrinsics["intrinsic_mat"]),
+            grid_size=(G, G, G),
         )  # Shape: (Nimages, Npoints, 2)
+        _LOGGER.info(f"Step 6 projection took {time.time()-t0:.2f}s"); t0 = time.time()
 
         # STEP 7: Normalize the projection to [-1, 1]
-        projection = (
-            projection
-            / torch.Tensor([intrinsics["width"], intrinsics["height"]]).float()
-        ) * 2.0 - 1.0
-
+        projection_px = projection
+        if args.upright_images:
+            projection_px = _rotate_uvs_batch(
+                projection_px,
+                frame_angles,
+                intrinsics["width"],
+                intrinsics["height"],
+            )
+       
+        H_in, W_in = 518, 518
+        W_orig = int(intrinsics["width"]); H_orig = int(intrinsics["height"])
+        proj_px_in = projection_px.clone()
+        proj_px_in[..., 0] = proj_px_in[..., 0] * (W_in / W_orig)
+        proj_px_in[..., 1] = proj_px_in[..., 1] * (H_in / H_orig)
+       
+        projection = proj_px_in.new_empty(proj_px_in.shape)
+        projection[..., 0] = ((proj_px_in[..., 0] + 0.5) / float(W_in)) * 2.0 - 1.0
+        projection[..., 1] = ((proj_px_in[..., 1] + 0.5) / float(H_in)) * 2.0 - 1.0
+       
         # STEP 8: Get the DINO embeddings
         patch_embeddings = _get_dino_embedding(
             rendered_obj
         )  # Shape: (Nimages, 1024, 64, 64)
-        patch_embeddings, (H_in, W_in, H_p, W_p) = _get_dino_embedding(rendered_obj.unsqueeze(0).cuda())
-
+       
+        _LOGGER.info(f"Step 8 get dino embedding took {time.time()-t0:.2f}s"); t0 = time.time()
+        
         # STEP 9: Match the embeddings to the projection
-        patchtokens = (
-            F.grid_sample(
-                patch_embeddings,
-                projection.cuda().unsqueeze(1),
-                mode="bilinear",
-                align_corners=False,
-            )
-            .squeeze(2)
-            .permute(0, 2, 1)
-            .cpu()
-            .numpy()
-        )  # Shape: (Nimages, Npoints, 1024)
-
-        patchtokens = np.mean(patchtokens, axis=0).astype(
-            np.float16
-        )  # Shape: (Npoints, 1024)
+        patchtokens = _average_patchtokens_chunked(
+            patch_embeddings,
+            projection,
+            projection_px,
+            (intrinsics["width"], intrinsics["height"]),
+            use_valid_mask=True,
+        ).cpu().numpy().astype(np.float16)
+        
         assert patchtokens.shape[0] == voxel_grid.shape[0]
         assert patchtokens.shape[1] == 1024
         assert voxel_grid.shape[1] == 3
@@ -329,7 +601,7 @@ def voxelise_features(
         if args.visualize:
             vis.save_voxel_as_ply(
                 voxel_grid.cpu().numpy(),
-                f"vis/{scan_id}_scene_level_voxel.ply",
+                f"vis/{scan_id}_scene_level_voxel_new.ply",
                 show_color=True,
             )
         assert voxel_grid.shape[-1] == 1027
@@ -338,12 +610,8 @@ def voxelise_features(
                 voxel_grid,
                 output_file=voxel_path,
             )
+        print("num_voxels:", voxel_grid.shape[0])
         
-        # # store held-out indxes
-        # held_out_dir = osp.join(scene_output_dir, "heldout_frame_indices.json")
-        # with open(held_out_dir, "w") as f:
-        #     json.dump(heldout_idxs,f)
-            
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         _LOGGER.exception(f"Error processing {scan_id} : {e}")
 
@@ -392,20 +660,35 @@ def process_data(
 
     subscan_ids_generated = subRescan_ids_generated
 
-    # all_subscan_ids = [
-    #     subscan_id
-    #     for scan_id in subscan_ids_generated
-    #     for subscan_id in subscan_ids_generated[scan_id]
-    # ]
-    all_subscan_ids = ["fcf66d88-622d-291c-871f-699b2d063630"]
+    all_subscan_ids = [
+        subscan_id
+        for scan_id in subscan_ids_generated
+        for subscan_id in subscan_ids_generated[scan_id]
+    ]
+    all_subscan_ids = all_subscan_ids[:10]
+    out_txt = osp.join(root_dir, 'files', f"reproj_{split}_processed_{mode}.txt")
+    with open(out_txt, "w") as f:
+        for sid in all_subscan_ids:
+            f.write(f"{sid}\n")
+    # all_subscan_ids = ["77361fca-d054-2a22-8974-547ca1fbb90f"]
+    # all_subscan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327','02b33df9-be2b-2d54-9062-1253be3ce186','02b33dfd-be2b-2d54-91d2-55454852009e','02b33e01-be2b-2d54-93fb-4145a709cec5',
+    #                          'fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d88-622d-291c-871f-699b2d063630','02b33e03-be2b-2d54-9129-5d28efdd68fa', '0958220d-e2c2-2de1-9710-c37018da1883',
+    #                          '0958220b-e2c2-2de1-96bc-739f09c1e8f8', '09582205-e2c2-2de1-9475-1cdac7639e60','09582207-e2c2-2de1-972c-225d968c2ab4', '09582209-e2c2-2de1-9610-08baed932919',
+    #                          '09582212-e2c2-2de1-9700-fa44b14fbded','0958221b-e2c2-2de1-96b1-6233099811a0','09582214-e2c2-2de1-956a-64d8da4ba7cc','09582216-e2c2-2de1-97de-efcab1ef9c43',
+    #                          '09582219-e2c2-2de1-9534-519142703037','09582225-e2c2-2de1-9564-f6681ef5e511', '0958222a-e2c2-2de1-9474-35e601b3682a','0958222d-e2c2-2de1-9732-e2fb990692ef',
+    #                          '09582223-e2c2-2de1-94b6-750684b4f80a', '09582228-e2c2-2de1-953d-f6f1ee4b3699','09582244-e2c2-2de1-956c-357092d949d1', 'dcb6a329-5526-23f1-9d81-7718f682269c']
+    
+    # all_subscan_ids = all_subscan_ids[:10]
+    
 
     for subscan_id in tqdm(all_subscan_ids):
-        obj_data = next(
-            obj_data
-            for obj_data in all_obj_info["scans"]
-            if obj_data["scan"] == subscan_id
-        )
-
+        # obj_data = next(
+        #     obj_data
+        #     for obj_data in all_obj_info["scans"]
+        #     if obj_data["scan"] == subscan_id
+        # )
+        rid = scans2ref[subscan_id]
+        obj_data = next(obj for obj in all_obj_info["scans"] if obj["scan"] == rid)
         voxelise_features(
             mode=mode,
             obj_data=obj_data,
@@ -417,6 +700,16 @@ def process_data(
     subscan_ids = np.array(subscan_ids_processed)
     return subscan_ids
 
+def _build_scan_to_ref() -> dict[str, str]:
+        scan_info_file = osp.join('/cluster/project/cvg/Shared_datasets/3RScan', "files", "3RScan.json")
+        all_scan_data = common.load_json(scan_info_file)
+        scans2ref = {}
+        for scan_data in all_scan_data:
+            ref_id = scan_data["reference"]
+            scans2ref[ref_id] = ref_id
+            for s in scan_data["scans"]:
+                scans2ref[s["reference"]] = ref_id
+        return scans2ref
 
 def parse_args() -> Tuple[Namespace, list]:
     """
@@ -439,11 +732,22 @@ def parse_args() -> Tuple[Namespace, list]:
         type=str,
     )
     parser.add_argument("--model_dir", type=str, default="")
-    parser.add_argument("--model", type=str, default="dinov3_vitl16")
+    # parser.add_argument("--model", type=str, default="dinov3_vitl16")
+    parser.add_argument("--model", type=str, default="dinov2_vitl14_reg")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--vis_dir", type=str, default="vis")
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--override", action="store_true")
+    parser.add_argument(
+        "--use_valid_mask",
+        action="store_true",
+        help="Mask out projections that fall outside the image before averaging DINO features.",
+    )
+    parser.add_argument(
+        "--upright_images",
+        action="store_true",
+        help="Rotate images (and projections) to align world +Z with image up.",
+    )
     args, unknown = parser.parse_known_args()
     return args, unknown
 
@@ -455,17 +759,18 @@ if __name__ == "__main__":
     os.makedirs(args.vis_dir, exist_ok=True)
     cfg = update_configs(args.config, unknown, do_ensure_dir=False)
     root_dir = cfg.data.root_dir
-
-    model = torch.hub.load("/home/yihan/.cache/torch/hub/facebookresearch_dinov3_main", args.model, source='local', pretrained=False)
-    ckpt_path = "/home/yihan/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    state_dict = ckpt.get("model", ckpt)
-    model.load_state_dict(state_dict, strict=False)
-    model.eval().cuda()
-    transform = transforms.Compose(
-        [
-            transforms.Resize((518, 518)),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
+    tranform_matrices = scan3r.read_transform_mat(
+        osp.join(root_dir, "files", "3RScan.json")
     )
+    scans2ref = _build_scan_to_ref()
+
+    # model = torch.hub.load("/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main", args.model, source='local', pretrained=False)
+    # ckpt_path = "/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    # ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    # state_dict = ckpt.get("model", ckpt)
+    # model.load_state_dict(state_dict, strict=False)
+    # torch.backends.cudnn.benchmark = True
+    # torch.set_float32_matmul_precision('high') 
+    model = torch.hub.load("facebookresearch/dinov2", args.model)
+    model.eval().cuda()
     scan_ids = process_data(cfg, mode="gs_annotations", split=args.split)

@@ -84,6 +84,49 @@ class FairSceneBatchSampler(Sampler):
         return n // self.batch_size if self.drop_last else ceil(n / self.batch_size)
 
 
+class SingleSceneBatchSampler(Sampler):
+    """
+    Yield batches made of frames from a single scene.
+    Ensures every batch contains only one scan_id, with up to batch_size frames.
+    """
+    def __init__(self, dataset, batch_size: int, drop_last: bool = False, seed: int = 0):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.seed = seed
+        self.epoch = 0
+        self._build_epoch_order()
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        self._build_epoch_order()
+
+    def _build_epoch_order(self):
+        rng = random.Random(self.seed + self.epoch)
+        by_scene = defaultdict(list)
+        for idx, it in enumerate(self.dataset.data_items):
+            by_scene[it["scan_id"]].append(idx)
+
+        self.scene_ids = list(by_scene.keys())
+        rng.shuffle(self.scene_ids)
+        self.scene_batches = []
+        for sid in self.scene_ids:
+            items = by_scene[sid]
+            rng.shuffle(items)
+            for i in range(0, len(items), self.batch_size):
+                batch = items[i : i + self.batch_size]
+                if len(batch) == self.batch_size or not self.drop_last:
+                    self.scene_batches.append(batch)
+        rng.shuffle(self.scene_batches)
+
+    def __iter__(self):
+        for batch in self.scene_batches:
+            yield batch
+
+    def __len__(self):
+        return len(self.scene_batches)
+
+
 def seed_worker(worker_id: int):
     worker_seed = torch.initial_seed() % 2**32
     numpy.random.seed(worker_seed)
@@ -116,9 +159,28 @@ def get_train_val_data_loader(
 def get_train_dataloader(cfg: Config, dataset: Any) -> tuple[data.Dataset, data.DataLoader]:
     train_dataset = dataset(cfg, split="train")
 
+    scene_batch_mode = getattr(cfg.train, "scene_batch_mode", "single_scene")
     use_fair = getattr(cfg.train, "scene_fair_sampling", True)
-    if use_fair:
-        # NEW: fair, scene-aware batching
+    if scene_batch_mode == "single_scene":
+        sampler = SingleSceneBatchSampler(
+            train_dataset,
+            batch_size=cfg.train.batch_size,
+            drop_last=False,
+            seed=getattr(cfg, "seed", 0),
+        )
+        g = torch.Generator()
+        g.manual_seed(getattr(cfg, "seed", 0))
+
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_sampler=sampler,
+            num_workers=cfg.train.num_workers,
+            collate_fn=train_dataset.collate_fn,
+            pin_memory=False,
+            worker_init_fn=seed_worker,
+            generator=g,
+        )
+    elif use_fair:
         sampler = FairSceneBatchSampler(
             train_dataset,
             batch_size=cfg.train.batch_size,
@@ -133,7 +195,7 @@ def get_train_dataloader(cfg: Config, dataset: Any) -> tuple[data.Dataset, data.
             batch_sampler=sampler,          # IMPORTANT: use batch_sampler (not batch_size/shuffle)
             num_workers=cfg.train.num_workers,
             collate_fn=train_dataset.collate_fn,
-            pin_memory=True,
+            pin_memory=False,
             worker_init_fn=seed_worker,
             generator=g,
         )
@@ -145,7 +207,7 @@ def get_train_dataloader(cfg: Config, dataset: Any) -> tuple[data.Dataset, data.
             num_workers=cfg.train.num_workers,
             shuffle=True,
             collate_fn=train_dataset.collate_fn,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=False,
         )
     return train_dataset, train_dataloader
@@ -161,7 +223,7 @@ def get_val_dataloader(
         num_workers=cfg.val.num_workers,
         shuffle=False,
         collate_fn=val_dataset.collate_fn,
-        pin_memory=True,
+        pin_memory=False,
         drop_last=False,
     )
     return val_dataset, val_dataloader
@@ -177,7 +239,7 @@ def get_test_dataloader(
         num_workers=cfg.val.num_workers,
         shuffle=False,
         collate_fn=test_dataset.collate_fn,
-        pin_memory=True,
+        pin_memory=False,
         drop_last=True,
     )
     return test_dataset, test_dataloader

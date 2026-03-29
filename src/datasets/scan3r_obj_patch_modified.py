@@ -113,7 +113,7 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
         self.resplit = "resplit_" if cfg.data.resplit else ""
 
         self._load_scan_ids()
-        self._load_held_out_idx()
+        # self._load_held_out_idx()
         self._load_images()
         self._load_extrinsics()
         self._load_intrinsics()
@@ -202,8 +202,34 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
             self.obj_2D_annos_pathes[scan_id] = osp.join(
                 self.gt_2D_anno_folder, "{}.pkl".format(scan_id)
             )
+            
+    def _filter_missing_splats(self):
+        keep = []
+        for scan_id in list(self.scan_ids):
+            if self.cfg.data.preload_slat:
+                p = os.path.join(self.scans_files_dir, "gs_embeddings",
+                                f"{scan_id}_slat.npz")
+                ok = os.path.exists(p)
+                missing = [p]
+            else:
+                p1 = os.path.join(self.scans_files_dir, "gs_annotations", scan_id,
+                                "scene_level_no_dilation_dinov2", f"voxel_output{self.suffix}.npz")
+                p2 = os.path.join(self.scans_files_dir, "gs_annotations", scan_id,
+                                "scene_level_no_dilation_dinov2", f"mean_scale{self.suffix}.npz")
+                ok = os.path.exists(p1) and os.path.exists(p2)
+                missing = [p for p in (p1, p2) if not os.path.exists(p)]
+
+            if ok:
+                keep.append(scan_id)
+            else:
+                _LOGGER.warning(f"Skipping scan_id={scan_id}; missing files: {missing}")
+
+        # Keep types consistent with your code (np array of str)
+        self.scan_ids = keep
+        self.all_scans_split = self.scan_ids
 
     def _load_scan_ids(self):
+        
         split = self.split
         scan_info_file = osp.join(self.scans_files_dir, "3RScan.json")
         all_scan_data = common.load_json(scan_info_file)
@@ -233,13 +259,55 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
         else:
             self.scan_ids = ref_scans_split
 
-        if self.cfg.mode == "debug_few_scan":
-            self.scan_ids = self.scan_ids[: int(0.1 * len(self.scan_ids))]
+        # if self.cfg.mode == "debug_few_scan":
+        #     self.scan_ids = self.scan_ids[: int(0.1 * len(self.scan_ids))]
         # valid_scan_ids = ['fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630']                
         # valid_scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327', 'fcf66d88-622d-291c-871f-699b2d063630'] 
-        valid_scan_ids = ['fcf66d88-622d-291c-871f-699b2d063630']                
-        self.scan_ids = valid_scan_ids
-        self.all_scans_split = valid_scan_ids
+        # valid_scan_ids = ['fcf66d88-622d-291c-871f-699b2d063630']                
+        # self.scan_ids = valid_scan_ids
+        # self.all_scans_split = valid_scan_ids
+        # if self.cfg.mode == "debug_few_scan":
+        # self.scan_ids = self.scan_ids[: int(0.1 * len(self.scan_ids))]
+        if self.cfg.autoencoder.train_structure:
+            base = "/cluster/scratch/wangyih/3RScan/files/gs_annotations"
+            filtered = []
+            missing = []
+            for sid in self.scan_ids:
+                npz_path = osp.join(base,
+                                    sid,
+                                    "scene_level_structure",
+                                    "student_pack_aligned_000000.npz")
+                if osp.isfile(npz_path):
+                    filtered.append(sid)
+                else:
+                    missing.append(sid)
+                if not filtered:
+                    _LOGGER.warning("[train_structure] No scans found with required NPZ.")
+                else:
+                    _LOGGER.info(
+                        "[train_structure] Kept %d/%d scans (have student_pack_aligned_000000.npz).",
+                        len(filtered), len(self.scan_ids)
+                    )
+
+                    self.scan_ids = filtered[:10]
+                    self.all_scans_split = self.scan_ids
+        else:
+            self.scan_ids = self.scan_ids[:800]
+            # self.scan_ids = self.scan_ids[::4]
+            # self.scan_ids = ['fcf66d88-622d-291c-871f-699b2d063630']
+            # self.scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327','02b33df9-be2b-2d54-9062-1253be3ce186','02b33dfd-be2b-2d54-91d2-55454852009e','02b33e01-be2b-2d54-93fb-4145a709cec5',
+            #                  'fcf66d8a-622d-291c-8429-0e1109c6bb26','fcf66d88-622d-291c-871f-699b2d063630','02b33e03-be2b-2d54-9129-5d28efdd68fa', '0958220d-e2c2-2de1-9710-c37018da1883',
+            #                  '0958220b-e2c2-2de1-96bc-739f09c1e8f8', '09582205-e2c2-2de1-9475-1cdac7639e60','09582207-e2c2-2de1-972c-225d968c2ab4', '09582209-e2c2-2de1-9610-08baed932919',
+            #                  '09582212-e2c2-2de1-9700-fa44b14fbded','0958221b-e2c2-2de1-96b1-6233099811a0','09582214-e2c2-2de1-956a-64d8da4ba7cc','09582216-e2c2-2de1-97de-efcab1ef9c43',
+            #                  '09582219-e2c2-2de1-9534-519142703037','09582225-e2c2-2de1-9564-f6681ef5e511', '0958222a-e2c2-2de1-9474-35e601b3682a','0958222d-e2c2-2de1-9732-e2fb990692ef',
+            #                  '09582223-e2c2-2de1-94b6-750684b4f80a', '09582228-e2c2-2de1-953d-f6f1ee4b3699','09582244-e2c2-2de1-956c-357092d949d1', 'dcb6a329-5526-23f1-9d81-7718f682269c']
+            # txt_path =  '/cluster/project/cvg/Shared_datasets/3RScan/files/reproj_train_processed_gs_annotations.txt'
+            # with open(txt_path, "r") as f:
+            #     self.scan_ids = [line.strip() for line in f if line.strip()]
+            self._filter_missing_splats()
+            self.scan_ids = self.scan_ids[:1]
+            self.all_scans_split = self.scan_ids
+          
 
 
     def _load_images(self):
@@ -344,14 +412,16 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
 
             for obj_id in self.scene_graphs[scan_id]["obj_ids"]:
                 gs_path = os.path.join(
-                    # self.scans_files_dir,
-                    "/home/yihan/3RScan_held_out/files",
+                    self.scans_files_dir,
+                    # "/cluster/scratch/wangyih/overfitting_dataset/3RScan_held_out/files",
                     "gs_annotations",
                     scan_id,
                     # str(obj_id),
-                    "scene_level",
+                    "scene_level_no_dilation_dinov2",
                     f"voxel_output{self.suffix}.npz",
                 )
+                
+                # print(gs_path)
                 try:
                     file = np.load(gs_path, mmap_mode="r")
                     gs = torch.from_numpy(file["arr_0"]).float()
@@ -366,12 +436,12 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
                 splat = SparseTensor(feats=feats, coords=coords.int())
 
                 mean_scale_path = os.path.join(
-                    # self.scans_files_dir,
-                    "/home/yihan/3RScan_held_out/files",
+                    self.scans_files_dir,
+                    # "/cluster/scratch/wangyih/overfitting_dataset/3RScan_held_out/files",
                     "gs_annotations",
                     scan_id,
                     # str(obj_id),
-                    "scene_level",
+                    "scene_level_no_dilation_dinov2",
                     f"mean_scale{self.suffix}.npz",
                 )
                 if os.path.exists(mean_scale_path):
@@ -484,19 +554,20 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
         points = torch.from_numpy(points).type(torch.FloatTensor)
         return points[label == obj_id] if obj_id != -1 else points
     
-    def _load_held_out_idx(self):
-        held_out_path_root = "/home/yihan/3RScan_held_out/files/gs_annotations" 
-        self.held_out_idxs = {}
-        for scan_id in self.scan_ids:
-            heldout_path = osp.join(
-            held_out_path_root, scan_id, "scene_level", "heldout_frame_indices.json"
-            )
-            try:
-                with open(heldout_path, "r") as f:
-                    heldout_frame_ids = json.load(f)
-            except FileNotFoundError:
-                heldout_frame_ids = []
-            self.held_out_idxs[scan_id]=heldout_frame_ids
+    # def _load_held_out_idx(self):
+    #     held_out_path_root = "/cluster/scratch/wangyih/overfitting_dataset/3RScan_held_out/files/gs_annotations" 
+    #     self.held_out_idxs = {}
+    #     for scan_id in self.scan_ids:
+    #         heldout_path = osp.join(
+    #         held_out_path_root, scan_id, "scene_level", "heldout_frame_indices.json"
+    #         )
+    #         try:
+    #             with open(heldout_path, "r") as f:
+    #                 heldout_frame_ids = json.load(f)
+    #         except FileNotFoundError:
+    #             heldout_frame_ids = []
+    #         # self.held_out_idxs[scan_id]=heldout_frame_ids
+    #         self.held_out_idxs[scan_id]=['000012', '000011', '000009', '000008', '000007', '000006', '000005', '000004', '000003', '000001']
            
                 
         
@@ -856,7 +927,7 @@ class Scan3RPatchObjectModifiedDataset(data.Dataset):
         data_dict["batch_size"] = batch_size
         data_dict["temporal"] = self.temporal
         data_dict["scan_ids"] = np.stack([data["scan_id"] for data in batch])
-        data_dict["held_out_idxs"] = self.held_out_idxs
+        # data_dict["held_out_idxs"] = self.held_out_idxs
         if self.temporal:
             data_dict["scan_ids_temp"] = np.stack(
                 [data["scan_id_temporal"] for data in batch]

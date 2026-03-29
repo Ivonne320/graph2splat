@@ -190,12 +190,14 @@ class Trainer(EpochBasedTrainer):
         x = x[0]
         return str(x)
 
-    def _choose_frame(self, frames_for_scene):
-        # if isinstance(frames_for_scene, dict):
-        #     for _, arr in frames_for_scene.items():
-        #         if isinstance(arr,(list,tuple)) and len(arr)>0: return str(arr[0])
-        # if isinstance(frames_for_scene,(list,tuple)) and len(frames_for_scene)>0:
-        #     return str(frames_for_scene[0])
+    def _choose_frame(self, scene_id: str, candidate_frames: List[str]) -> str:
+        if candidate_frames:
+            return random.choice(candidate_frames)
+        frame_ids = scan3r.load_frame_idxs(
+            osp.join(self.cfg.data.root_dir, "scenes"), scene_id
+        )
+        if frame_ids:
+            return frame_ids[0]
         return "000000"
     
     def _rasterize_idx(self, idx_np: np.ndarray, G: int) -> torch.Tensor:
@@ -228,19 +230,20 @@ class Trainer(EpochBasedTrainer):
     #     return occ, cond
     
     def _make_batch(self, data_dict: Dict[str, Any]):
-        B = len(data_dict["scene_graphs"]["scene_ids"])
-        frames_all = data_dict["scene_graphs"].get("obj_img_top_frames", {})
-        scene_ids = data_dict["scene_graphs"]["scene_ids"]
+        scene_graphs = data_dict["scene_graphs"]
+        scene_ids_arr = scene_graphs["scene_ids"]
+        scene_ids = [self._scene_id(sid) for sid in scene_ids_arr]
+        image_frames = scene_graphs.get("image_frames", {})
+        B = len(scene_ids)
 
         occ_gt_list, occ_vis_list, cond_tok_list = [], [], []
         G = self.G
         patch_size = getattr(self.model.flow, "patch_size", 1)
 
-        for b in range(B):
-            sid = self._scene_id(scene_ids[b])
-            frames_for_scene = frames_all.get(sid, [])
-            fid = self._choose_frame(frames_for_scene)
-            pack = self._load_aligned_pack('/home/yihan/3RScan_structure_models/', sid, fid)
+        for sid in scene_ids:
+            frames_for_scene = image_frames.get(sid, [])
+            fid = self._choose_frame(sid, frames_for_scene)
+            pack = self._load_aligned_pack(self.root_dir, sid, fid)
 
             occ_gt, occ_vis, cond_tokens = self._build_occ_and_cond_tokens(pack, G, patch_size)
             occ_gt_list.append(occ_gt.unsqueeze(0))

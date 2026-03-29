@@ -62,6 +62,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
         self.scenes_dir = osp.join(cfg.data.root_dir, "scenes")
         self.scans_files_dir_mode = osp.join(self.scans_files_dir, "orig")
         self.use_student_structure = getattr(cfg.data, "use_student_structure", True)
+        self.use_obj_id_filter = getattr(cfg.data, "use_obj_id_filter", Train)
         self.student_structure_format = getattr(
             cfg.data, "student_structure_format", "sparse"
         )
@@ -266,9 +267,9 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 missing = [p]
             else:
                 p1 = os.path.join(self.scans_files_dir, "gs_annotations", scan_id,
-                                "scene_level_dinov2_256_no_dilation_clean", f"voxel_output{self.suffix}.npz")
+                                "scene_level_dinov2_128_no_dilation_clean", f"voxel_output{self.suffix}.npz")
                 p2 = os.path.join(self.scans_files_dir, "gs_annotations", scan_id,
-                                "scene_level_dinov2_256_no_dilation_clean", f"mean_scale{self.suffix}.npz")
+                                "scene_level_dinov2_128_no_dilation_clean", f"mean_scale{self.suffix}.npz")
                 ok = os.path.exists(p1) and os.path.exists(p2)
                 missing = [p for p in (p1, p2) if not os.path.exists(p)]
 
@@ -368,31 +369,34 @@ class Scan3RSceneBatchDataset(data.Dataset):
         # valid_scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327',"fcf66d88-622d-291c-871f-699b2d063630", "fcf66d8a-622d-291c-8429-0e1109c6bb26", "e44d238c-52a2-2879-89d9-a29ba04436e0"]    
         # valid_scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327',"fcf66d88-622d-291c-871f-699b2d063630", "fcf66d8a-622d-291c-8429-0e1109c6bb26"]    
         if self.cfg.autoencoder.train_structure:
+            self._filter_missing_splats()
             base = "/cluster/scratch/wangyih/3RScan/files/gs_annotations"
             filtered = []
-            missing = []
             for sid in self.scan_ids:
-                npz_path = osp.join(base,
-                                    sid,
-                                    "scene_level_structure_no_dilation_128",
-                                    "student_pack_aligned_000059.npz")
-                if osp.isfile(npz_path):
-                    filtered.append(sid)
-                else:
-                    missing.append(sid)
-                if not filtered:
-                    _LOGGER.warning("[train_structure] No scans found with required NPZ.")
-                else:
-                    _LOGGER.info(
-                        "[train_structure] Kept %d/%d scans (have student_pack_aligned_000000.npz).",
-                        len(filtered), len(self.scan_ids)
-                    )
-
-                    self.scan_ids = filtered[:10]
-                    # self.scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327']
-                    _LOGGER.info(f"scan_ids:{self.scan_ids}")
-                    # self.scan_ids = filtered[:700]
-                    self.all_scans_split = self.scan_ids
+                pack_path = osp.join(base, sid, "scene_level_structure_no_dilation_128",
+                                     "student_pack_aligned_000000.npz")
+                if not osp.isfile(pack_path):
+                    continue
+                if self.use_obj_id_filter:
+                    meta_path = osp.join(base, sid, "scene_level_structure_no_dilation_128",
+                                         "scene_occ_meta.npz")
+                    if not osp.isfile(meta_path):
+                        continue
+                    with np.load(meta_path, allow_pickle=False) as meta:
+                        if "vox_idx_gt_obj_ids" not in meta.files:
+                            continue
+                filtered.append(sid)
+            if not filtered:
+                _LOGGER.warning("[train_structure] No scans found with required NPZ.")
+            else:
+                label = "obj_id_filter" if self.use_obj_id_filter else "student_pack"
+                _LOGGER.info(
+                    "[train_structure] Kept %d/%d scans (%s).",
+                    len(filtered), len(self.scan_ids), label,
+                )
+                self.scan_ids = filtered
+                _LOGGER.info(f"scan_ids:{self.scan_ids}")
+                self.all_scans_split = self.scan_ids
         else:
             self.scan_ids = self.scan_ids
             # self.scan_ids = self.scan_ids[::4]
@@ -407,7 +411,9 @@ class Scan3RSceneBatchDataset(data.Dataset):
             # with open(txt_path, "r") as f:
             #     self.scan_ids = [line.strip() for line in f if line.strip()]
             self._filter_missing_splats()
-            self.scan_ids = self.scan_ids[:100]
+            # self.scan_ids = self.scan_ids[2:3]
+            self.scan_ids = self.scan_ids[:20][::2]
+            # self.scan_ids = self.scan_ids[:10][::2]
             # idx = [22, 38, 34, 31, 63, 4, 67, 17, 97, 2 ]
             # idx = [20, 75, 69, 35, 0, 7, 42, 28, 96, 40]
             # self.scan_ids = [self.scan_ids[i] for i in idx]
@@ -547,7 +553,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 "gs_annotations",
                 scan_id,
                 # str(obj_id),
-                "scene_level_dinov2_256_no_dilation_clean",
+                "scene_level_dinov2_128_no_dilation_clean",
                 f"voxel_output{self.suffix}.npz",
             )
             try:
@@ -576,7 +582,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                 "gs_annotations",
                 scan_id,
                 # str(obj_id),
-                "scene_level_dinov2_256_no_dilation_clean",
+                "scene_level_dinov2_128_no_dilation_clean",
                 f"mean_scale{self.suffix}.npz",
             )
             if os.path.exists(mean_scale_path):
@@ -753,12 +759,11 @@ class Scan3RSceneBatchDataset(data.Dataset):
         # behavior when the keys already exist).
         meta_path = osp.join(base, "scene_occ_meta.npz")
         if osp.isfile(meta_path):
-            need_meta = any(
-                key not in pack for key in ("vox_idx_gt_occ", "mean_gt", "scale_gt")
-            )
+            meta_keys = ("vox_idx_gt_occ", "mean_gt", "scale_gt", "vox_idx_gt_obj_ids")
+            need_meta = any(key not in pack for key in meta_keys)
             if need_meta:
                 with np.load(meta_path, allow_pickle=False) as meta:
-                    for key in ("vox_idx_gt_occ", "mean_gt", "scale_gt"):
+                    for key in meta_keys:
                         if key not in pack and key in meta.files:
                             pack[key] = meta[key]
         pack["__path__"] = path
@@ -774,15 +779,15 @@ class Scan3RSceneBatchDataset(data.Dataset):
     def _load_dino_tokens_tensor(self, pack_path: str, frame_id: str) -> torch.Tensor:
         base = osp.dirname(pack_path)
         key = (base, frame_id)
-        cached = self._dino_token_cache.get(key)
-        if cached is not None:
-            return cached
+        # cached = self._dino_token_cache.get(key)
+        # if cached is not None:
+        #     return cached
         tokens_path = osp.join(base, f"dino_tokens_{frame_id}.npy")
         if not osp.isfile(tokens_path):
             raise FileNotFoundError(f"Missing DINO tokens file: {tokens_path}")
         arr = np.load(tokens_path, mmap_mode="r")
         tensor = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0)
-        self._dino_token_cache[key] = tensor
+        # self._dino_token_cache[key] = tensor
         return tensor
 
     def _sample_features_from_grid(self, pack: dict, sample_grid_np: np.ndarray) -> np.ndarray:
@@ -811,7 +816,20 @@ class Scan3RSceneBatchDataset(data.Dataset):
             np.int32
         )
         G = int(pack.get("G", 128))
-        _LOGGER.info(f"G:{G}")
+        # _LOGGER.info(f"G:{G}")
+
+        if self.use_obj_id_filter:
+            vox_obj_ids = pack.get("vox_idx_gt_obj_ids")
+            visible_obj_ids = pack.get("visible_obj_ids")
+            if (
+                vox_obj_ids is not None
+                and visible_obj_ids is not None
+                and gt_idx_np.size > 0
+                and visible_obj_ids.size > 0
+            ):
+                mask = np.isin(vox_obj_ids, visible_obj_ids)
+                gt_idx_np = gt_idx_np[mask]
+
         if gt_idx_np.size == 0:
             coords_sparse = torch.zeros((1, 3), dtype=torch.int32)
             coords_dense = torch.zeros((0, 3), dtype=torch.int32)

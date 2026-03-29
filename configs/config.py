@@ -92,6 +92,8 @@ class DataConfig(BaseModel):
     debug_few_scans: Optional[int] = None
     preload_masks: bool = False
     preload_slat: bool = True
+    use_student_structure: bool = False
+    single_view_supervision_frames: Optional[int] = 40
     img: ImageConfig = Field(default_factory=ImageConfig)
     cross_scene: CrossSceneConfig = Field(default_factory=CrossSceneConfig)
     scene_graph: SceneGraphConfig = Field(default_factory=SceneGraphConfig)
@@ -174,6 +176,7 @@ class DecoderConfig(BaseModel):
 class AutoencoderConfig(BaseModel):
     guidance: bool = False
     sh_degree: int = 0
+    train_structure: bool = False
     num_gaussians: int = 32
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     decoder: DecoderConfig = Field(default_factory=DecoderConfig)
@@ -245,6 +248,7 @@ class TrainConfig(BaseModel):
     val_steps: int = 1
     inner_val_steps: int = 2000
     checkpoint_path: str='pretrained/scene_decoder_snapshot.pth.tar'
+    object_level: bool = False
 
 
 # Scene Graph Localizer

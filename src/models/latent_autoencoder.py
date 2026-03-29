@@ -37,7 +37,7 @@ class LatentAutoencoder(nn.Module):
             path = trellis_pipeline["args"]["models"]["slat_encoder"]
             with open(f"{SCRATCH}/TRELLIS-image-large/{path}.json", "r") as f:
                 configs = json.load(f)
-            configs["args"]["resolution"]=256
+            configs["args"]["resolution"]=128
             
             state_dict = load_file(f"{SCRATCH}/TRELLIS-image-large/{path}.safetensors")
             self.encoder = SLatEncoder(**configs["args"])
@@ -45,7 +45,7 @@ class LatentAutoencoder(nn.Module):
             self.encoder = self.encoder.to(device)
         else:
             self.encoder = SLatEncoder(
-                resolution=256,
+                resolution=128,
                 in_channels=1024,
                 model_channels=768,
                 latent_channels=16,
@@ -66,13 +66,13 @@ class LatentAutoencoder(nn.Module):
             if self.cfg.sh_degree > 0:
                 configs["args"]["representation_config"]["lr"]["_features_rest"] = 1.0
             # configs["args"]["representation_config"]["num_gaussians"]=self.cfg.num_gaussians
-            configs["args"]["representation_config"]["num_gaussians"]=8
+            configs["args"]["representation_config"]["num_gaussians"]=32
             # configs["args"]["representation_config"]["perturb_offset"] = False
             # configs["args"]["representation_config"]["voxel_size"]=1.5
             configs["args"]["representation_config"]["scaling_bias"]= 8e-4
             configs["args"]["representation_config"]["scaling_activation"] = 'exp'
-            configs["args"]["resolution"]=256
-            configs["args"]["latent_channels"]=1024
+            configs["args"]["resolution"]=128
+            # configs["args"]["latent_channels"]=1024
             configs["args"]["representation_config"]["3d_filter_kernel_size"] = 2e-4
 
             
@@ -81,7 +81,7 @@ class LatentAutoencoder(nn.Module):
 
         else:
             net = SLatGaussianDecoder(
-                resolution=256,
+                resolution=128,
                 model_channels=768,
                 latent_channels=19,
                 num_blocks=12,

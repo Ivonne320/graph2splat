@@ -1,5 +1,6 @@
 import itertools
 import logging
+from collections import Counter, defaultdict
 import os
 import os.path as osp
 from argparse import ArgumentParser, Namespace
@@ -355,7 +356,7 @@ def _project_and_sample_dino(
     idx_all = np.arange(voxel_world.shape[0])
     idx_img = idx_all[inb_img.cpu().numpy()]
 
-    # map to DINO input space (e.g., 512 for DINOv3 ViT-L/16)
+    # map to DINO input space (e.g., 518 for DINOv3 ViT-L/16)
     H_in, W_in = dino_in_hw
     sx = float(W_in) / float(W_rgb)
     sy = float(H_in) / float(H_rgb)
@@ -381,11 +382,13 @@ def _normalize_segmented_mesh(segmented_mesh: o3d.geometry.TriangleMesh):
     vertices = np.asarray(segmented_mesh.vertices)
     mean = vertices.mean(axis=0)
     vertices -= mean
-    scale = np.max(np.abs(vertices), axis=0)
-    scale[scale == 0] = 1.0
+    # scale = np.max(np.abs(vertices), axis=0)
+    scale = np.max(np.abs(vertices))
+    # scale[scale == 0] = 1.0
     vertices *= 1.0 / (2 * scale)
     vertices = np.clip(vertices, -0.5 + 1e-6, 0.5 - 1e-6)
     segmented_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    scale = np.array([scale, scale, scale])
     return mean, scale
 
 @torch.no_grad()
@@ -433,6 +436,7 @@ def voxelise_features(
     scene_mesh = o3d.geometry.TriangleMesh()
     scene_mesh.vertices = o3d.utility.Vector3dVector(vertices[selected_vertices])
     scene_mesh.triangles = o3d.utility.Vector3iVector(remapped_faces)
+    vertex_obj_ids = annos[selected_vertices].astype(np.int32)
     # ---------- OUTPUT DIR ----------
     scene_output_dir = osp.join(
         args.model_dir,
@@ -449,14 +453,50 @@ def voxelise_features(
     if args.override or not osp.isfile(scene_meta_path):
         scene_mesh_canonical = copy.deepcopy(scene_mesh)
         mean_gt, scale_gt = _normalize_segmented_mesh(scene_mesh_canonical)
-        voxel_grid_canonical = voxelize_mesh_simple_dense(
-            scene_mesh_canonical,
-            G=G,
-            n_rand=0,
-            k_dilate=2,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+        pcd = scene_mesh_canonical.sample_points_uniformly(number_of_points=400000)
+        # voxel_grid_canonical = voxelize_mesh_simple_dense(
+        #     scene_mesh_canonical,
+        #     G=G,
+        #     n_rand=0,
+        #     k_dilate=2,
+        #     device="cuda" if torch.cuda.is_available() else "cpu",
+        # )
+        voxel_grid_canonical = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(
+            pcd,
+            voxel_size=1/G,
+            min_bound=(-0.5, -0.5, -0.5),
+            max_bound=(0.5, 0.5, 0.5)
         )
+        voxel_grid_canonical = np.array([voxel.grid_index for voxel in voxel_grid_canonical.get_voxels()])
         vox_idx_gt_occ = voxel_grid_canonical.astype(np.int32)
+
+        # Compute per-voxel object IDs by voting from mesh vertices in canonical space.
+        # vertices of scene_mesh_canonical are already normalized to [-0.5, 0.5].
+        vertices_can = np.asarray(scene_mesh_canonical.vertices, dtype=np.float32)
+        vert_idx_can = np.clip(
+            np.floor((vertices_can + 0.5 - 1e-6) * G).astype(np.int32), 0, G - 1
+        )
+        lin_vert = (
+            vert_idx_can[:, 0] * G * G
+            + vert_idx_can[:, 1] * G
+            + vert_idx_can[:, 2]
+        )
+        lin_vox = (
+            vox_idx_gt_occ[:, 0] * G * G
+            + vox_idx_gt_occ[:, 1] * G
+            + vox_idx_gt_occ[:, 2]
+        )
+        lin_to_voxpos = np.full(G * G * G, -1, dtype=np.int32)
+        lin_to_voxpos[lin_vox] = np.arange(len(lin_vox), dtype=np.int32)
+        vert_voxpos = lin_to_voxpos[lin_vert]
+        valid = vert_voxpos >= 0
+        vox_obj_vote: defaultdict = defaultdict(Counter)
+        for vp, oid in zip(vert_voxpos[valid].tolist(), vertex_obj_ids[valid].tolist()):
+            vox_obj_vote[vp][oid] += 1
+        vox_idx_gt_obj_ids = np.zeros(len(vox_idx_gt_occ), dtype=np.int32)
+        for vp, counter in vox_obj_vote.items():
+            vox_idx_gt_obj_ids[vp] = max(counter, key=counter.get)
+
         if not args.dry_run:
             np.savez(
                 scene_meta_path,
@@ -464,6 +504,7 @@ def voxelise_features(
                 mean_gt=mean_gt.astype(np.float32),
                 scale_gt=scale_gt.astype(np.float32),
                 vox_idx_gt_occ=vox_idx_gt_occ,
+                vox_idx_gt_obj_ids=vox_idx_gt_obj_ids,
             )
             _LOGGER.info(
                 f"[{scan_id}] Saved canonical occupancy meta → {scene_meta_path}"
@@ -473,8 +514,11 @@ def voxelise_features(
         mean_gt = meta_npz["mean_gt"].astype(np.float32)
         scale_gt = meta_npz["scale_gt"].astype(np.float32)
         vox_idx_gt_occ = meta_npz["vox_idx_gt_occ"].astype(np.int32)
+        vox_idx_gt_obj_ids = meta_npz["vox_idx_gt_obj_ids"].astype(np.int32)
 
     # ---------- (B) PER-FRAME LOOP: ROTATE CENTERS & RE-INDEX; BUILD PACK ----------
+    masks_all = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
+    object_ids_arr = np.array(object_ids, dtype=np.int32)
     for ref_fid in frame_idxs:
         # 1) seed lifting
         out_name = f"student_pack_aligned_{ref_fid}.npz"
@@ -518,7 +562,7 @@ def voxelise_features(
         seed_idx = np.floor((x_norm + 0.5) * G).astype(np.int32)
         seed_idx = np.clip(seed_idx, 0, G - 1)
         seed_idx = np.unique(seed_idx, axis = 0)
-        seed_idx = _dilate_voxels_from_idx(seed_idx, grid_size=G)
+        # seed_idx = _dilate_voxels_from_idx(seed_idx, grid_size=G)
         # seed_idx = _dilate_voxels_idx(seed_idx)
         _LOGGER.info(f"Dilation of seed took {time.time()-t0:.2f}s"); t0 = time.time()
         # _LOGGER.info(f"Dilation took {time.time()-t0:.2f}s"); t0 = time.time()
@@ -561,6 +605,17 @@ def voxelise_features(
                 show_color=True,
             )
 
+        # Determine which scene objects are visible in this frame from the 2D mask.
+        # Fall back to all scene objects if the mask is missing for this frame.
+        frame_mask = masks_all.get(ref_fid)
+        if frame_mask is not None:
+            visible_obj_ids = np.intersect1d(
+                np.unique(frame_mask).astype(np.int32), object_ids_arr
+            ).astype(np.int32)
+        else:
+            _LOGGER.warning(f"[{scan_id}:{ref_fid}] No 2D mask found; using all object IDs.")
+            visible_obj_ids = object_ids_arr.copy()
+
         # 6) PACK: fixed canonical box (mu=0, scale=s_iso) + per-frame rotation/scene meta
         pack = {
             "G": np.int32(G),
@@ -573,6 +628,7 @@ def voxelise_features(
             "seed_box_init_scale": np.float32(scale_seed),            # for logging
             "frame_id_used": np.array(ref_fid),
             "pad_meta": np.array([-1, 1], dtype=np.float32),
+            "visible_obj_ids": visible_obj_ids,
         }
 
         out_name = f"student_pack_aligned_{ref_fid}.npz"
@@ -641,8 +697,9 @@ def process_data(
         for scan_id in subscan_ids_generated
         for subscan_id in subscan_ids_generated[scan_id]
     ]
-    all_subscan_ids = all_subscan_ids[:10]
-
+    all_subscan_ids = all_subscan_ids[200:][::2]
+    # all_subscan_ids = ['bf9a3df1-45a5-2e80-8198-0652e415e289','1dd720a1-2ba0-22d9-8b6e-bb00c888a414','10b17967-3938-2467-88c5-a299519f9ad7','1d234014-e280-2b1a-8eab-fe44989693aa','1d2f8518-d757-207c-8d4a-b2f43254c68f',
+    #                    'ea31825e-0a4c-2749-91f9-1cc45973a0f6','20c993a1-698f-29c5-8716-5a937fdd879a','42384916-60a7-271e-9c1f-6722abc6495d','20c993af-698f-29c5-84b2-972451f94cfb']
 
     for subscan_id in tqdm(all_subscan_ids):
         obj_data = next(
@@ -685,8 +742,8 @@ def parse_args() -> Tuple[Namespace, list]:
         type=str,
     )
     parser.add_argument("--model_dir", type=str, default="")
-    parser.add_argument("--model", type=str, default="dinov3_vitl16")
-    # parser.add_argument("--model", type=str, default="dinov2_vitl14_reg")
+    # parser.add_argument("--model", type=str, default="dinov3_vitl16")
+    parser.add_argument("--model", type=str, default="dinov2_vitl14_reg")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--vis_dir", type=str, default="vis")
     parser.add_argument("--dry_run", action="store_true")
@@ -703,17 +760,17 @@ if __name__ == "__main__":
     cfg = update_configs(args.config, unknown, do_ensure_dir=False)
     root_dir = cfg.data.root_dir
 
-    model = torch.hub.load("/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main/", args.model, source='local', pretrained=False)
-    ckpt_path = "/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    state_dict = ckpt.get("model", ckpt)
-    model.load_state_dict(state_dict, strict=False)
+    # model = torch.hub.load("/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main/", args.model, source='local', pretrained=False)
+    # ckpt_path = "/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    # ckpt = torch.load(ckpt_path, map_location="cpu")
+    # state_dict = ckpt.get("model", ckpt)
+    # model.load_state_dict(state_dict, strict=False)
 
-    # model = torch.hub.load("facebookresearch/dinov2", args.model)
+    model = torch.hub.load("facebookresearch/dinov2", args.model)
     model.eval().cuda()
     transform = transforms.Compose(
         [
-            transforms.Resize((512, 512)),
+            transforms.Resize((518, 518)),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )

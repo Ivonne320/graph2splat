@@ -122,13 +122,20 @@ class Scan3RObjectDataset(data.Dataset):
 
         if self.cfg.mode == "debug_few_scan":
             self.scan_ids = self.scan_ids[: int(0.1 * len(self.scan_ids))]
+        self.scan_ids = self.scan_ids[:5]
+        self.all_scans_split = self.scan_ids
 
     def _load_images(self):
         self.image_paths = {}
         for scan_id in tqdm.tqdm(self.scan_ids, desc="Images"):
-            self.image_paths[scan_id] = scan3r.load_frame_paths(
-                self.scans_dir, scan_id, self.cfg.data.img.img_step
+            paths, _ = scan3r.load_frame_paths(
+                self.scans_dir,
+                scan_id,
+                self.cfg.data.img.img_step,
+                min_focus=None,
+                max_frames=None,
             )
+            self.image_paths[scan_id] = paths
 
     def _load_extrinsics(self):
         with Pool(processes=cpu_count()) as p:
@@ -144,9 +151,9 @@ class Scan3RObjectDataset(data.Dataset):
                                 self.image_paths[scan_id],
                                 scan_id,
                             )
-                            for scan_id in self.scan_ids
+                            for scan_id in self.all_scans_split
                         ],
-                        desc="Extrinsics",
+                        # desc="Extrinsics",
                     ),
                 )
             ]

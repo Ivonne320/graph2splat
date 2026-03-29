@@ -26,11 +26,14 @@ __pycache__/
 logs/
 *_ignore*
 
+
 # environment
 .venv/
 training_out/
+*.png
 
 *.pt
 *.tar
 pretrained/
 slurm*
+results/*

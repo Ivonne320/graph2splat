@@ -4,14 +4,22 @@ import itertools
 import os
 import os.path as osp
 import time
+import random
 from typing import Any, Dict, List, Optional, Tuple
-
+from argparse import Namespace
 import numpy as np
+from torchvision.utils import save_image
+
+from utils import common, scan3r
 import torch
 import types
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from gaussian_renderer import render
+from scene.cameras import MiniCam2
+from utils.graphics_utils import focal2fov
+from PIL import Image
 
 from configs import Config, update_configs
 from src.datasets import Scan3RSceneBatchDataset
@@ -48,12 +56,12 @@ class Trainer(EpochBasedTrainer):
             getattr(cfg.train.loss, "latent_pred_occ_threshold", 0.5)
         )
         self.teacher_scene_use = bool(getattr(cfg.train, "teacher_scene_use", True))
+        self.photometric = bool(getattr(cfg.train, "photometric", True))
         self.teacher_scene_subdir = getattr(
-            cfg.data, "teacher_scene_subdir", "scene_level_dinov3_128_reso_fixed"
+            cfg.data, "teacher_scene_subdir", "scene_level_dinov2_128_no_dilation_clean"
         )
         self.teacher_scene_suffix = "_dense" if cfg.data.from_gt else ""
         self.scans_files_dir = osp.join(cfg.data.root_dir, "files")
-        self._teacher_scene_cache: dict[str, dict[str, Any]] = {}
         self.teacher_overlap_log_every = int(getattr(cfg.train, "teacher_overlap_log_every", 2))
         self.teacher_overlap_axis_diag = bool(
             getattr(cfg.train, "teacher_overlap_axis_diag", True)
@@ -66,6 +74,11 @@ class Trainer(EpochBasedTrainer):
         self.use_amp = torch.cuda.is_available() and device_obj.type == "cuda"
         default_pack_root = "/cluster/scratch/wangyih/3RScan"
         self.student_pack_root = getattr(cfg.data, "student_pack_root", default_pack_root)
+        self._pipe_cfg = Namespace(
+            debug=False,
+            compute_cov3D_python=False,
+            convert_SHs_python=False,
+        )
         subdir_cfg = getattr(cfg.data, "student_pack_subdir", "scene_level_structure_no_dilation_128")
         if isinstance(subdir_cfg, (list, tuple)):
             self.student_pack_subdirs = list(subdir_cfg)
@@ -101,8 +114,9 @@ class Trainer(EpochBasedTrainer):
                 )
         self.logger.info(f"Seed feature dimension: {self.seed_feat_dim}")
 
-        self.teacher_encoder = self._build_teacher()
+        self.teacher_encoder, self.teacher_decoder, self.teacher = self._build_teacher()
         teacher_latent_dim = self._infer_teacher_latent_dim(self.teacher_encoder)
+        # teacher_latent_dim = 1024
         if teacher_latent_dim is not None and teacher_latent_dim != self.latent_dim:
             self.logger.warning(
                 f"Teacher latent dim {teacher_latent_dim} differs from UNet config {self.latent_dim}; aligning to teacher."
@@ -265,8 +279,10 @@ class Trainer(EpochBasedTrainer):
         self.logger.info(f"teacher initialized")
         self.logger.info(teacher.encoder )
         # snapshot = getattr(self.cfg.train, "teacher_snapshot", None)
-        snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/100scenes/with-encoder-clamp-min-scale-con-full-100loss/snapshots/epoch-7.pth.tar'
-        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/batch/debug/20251218_summary_single_scene_resolution/128_reso_10_scenes_6_bs_32/snapshots/epoch-1560.pth.tar'
+        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/10-clean/test-256-random-1/snapshots/epoch-200.pth.tar'
+        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/teacher/500scenes-128/snapshots/epoch-27.pth.tar'
+        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/teacher/200scenes-128/snapshots/epoch-138.pth.tar'
+        snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/teacher/200scenes-128/snapshots/epoch-264.pth.tar'
         if snapshot:
             if osp.isfile(snapshot):
                 state = torch.load(snapshot, map_location=self.device)
@@ -279,10 +295,14 @@ class Trainer(EpochBasedTrainer):
             else:
                 self.logger.warning(f"Teacher snapshot not found at {snapshot}, using randomly initialized weights.")
         teacher.encoder.eval()
+        teacher.decoder.eval()
+
         for param in teacher.encoder.parameters():
             param.requires_grad = False
+        for param in teacher.decoder.parameters():
+            param.requires_grad = False
         self.logger.info("Initialized frozen teacher encoder for slat supervision")
-        return teacher.encoder
+        return teacher.encoder, teacher.decoder, teacher
 
     @staticmethod
     def _infer_teacher_latent_dim(teacher_encoder) -> int:
@@ -341,8 +361,9 @@ class Trainer(EpochBasedTrainer):
             feat_in=self.seed_feat_dim,
             out_channels=out_channels,
         ).to(self.device)
-        snapshot = getattr(self.cfg.train, "unet_completion_snapshot", None)
-        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/2025-12-30-slat_completion_10_scenes/snapshots/epoch-40.pth.tar'
+        # snapshot = getattr(self.cfg.train, "unet_completion_snapshot", None)
+        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/200scenes-debug/snapshots/epoch-15.pth.tar'
+        snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/10scenes-debug-with-photometric/snapshots/epoch-37.pth.tar'
         if snapshot and osp.exists(snapshot):
             state = torch.load(snapshot, map_location=self.device)
             model_state = state.get("model", state)
@@ -505,9 +526,10 @@ class Trainer(EpochBasedTrainer):
         return splat
 
     def _load_teacher_scene_voxels(self, scan_id: str) -> dict[str, Any]:
-        cached = self._teacher_scene_cache.get(scan_id)
-        if cached is not None:
-            return cached
+        # cached = self._teacher_scene_cache.get(scan_id)
+        # if cached is not None:
+        #     return cached
+        self.logger.info(f"scan_id: {scan_id} ")
 
         base = osp.join(
             self.scans_files_dir,
@@ -525,18 +547,16 @@ class Trainer(EpochBasedTrainer):
                 arr = data["arr_0"]
         except FileNotFoundError:
             self.logger.warning(f"Teacher voxel file missing for {scan_id} ({voxel_path}).")
-            payload = {
+            return {
                 "coords": torch.zeros((0, 3), dtype=torch.int32),
                 "feats": torch.zeros((0, 1024), dtype=torch.float32),
                 "mean": torch.zeros((3,), dtype=torch.float32),
                 "scale": torch.ones((3,), dtype=torch.float32),
                 "G": self.G,
             }
-            self._teacher_scene_cache[scan_id] = payload
-            return payload
         coords = torch.from_numpy(arr[:, :3].astype(np.int32))
         feats = torch.from_numpy(arr[:, 3:].astype(np.float32))
-        G_scene = int(coords.max().item() + 1) if coords.numel() > 0 else self.G
+        G_scene = self.G
 
         if osp.exists(mean_scale_path):
             with np.load(mean_scale_path, allow_pickle=False) as ms:
@@ -555,67 +575,20 @@ class Trainer(EpochBasedTrainer):
         elif scale.numel() >= 3:
             scale = scale[:3]
 
-        payload = {
+        return {
             "coords": coords,
             "feats": feats,
             "mean": mean,
             "scale": scale,
             "G": G_scene,
         }
-        self._teacher_scene_cache[scan_id] = payload
-        return payload
-
-    def _axis_overlap_diag(
-        self, idx_src: torch.Tensor, idx_ref: torch.Tensor, G: int
-    ) -> Optional[dict[str, Any]]:
-        if idx_src.numel() == 0 or idx_ref.numel() == 0:
-            return None
-        idx_src = idx_src.long()
-        idx_ref = idx_ref.long()
-        idx_src = torch.clamp(idx_src, 0, G - 1)
-        idx_ref = torch.clamp(idx_ref, 0, G - 1)
-
-        lin_ref = idx_ref[:, 0] * G * G + idx_ref[:, 1] * G + idx_ref[:, 2]
-        occ_ref = torch.zeros(G * G * G, dtype=torch.bool, device=idx_ref.device)
-        occ_ref[lin_ref] = True
-
-        best = None
-        axes = ("x", "y", "z")
-        perms = list(itertools.permutations((0, 1, 2), 3))
-        for perm in perms:
-            idx_perm = idx_src[:, perm]
-            for flip_mask in range(8):
-                idx_t = idx_perm
-                if flip_mask:
-                    idx_t = idx_t.clone()
-                    if flip_mask & 1:
-                        idx_t[:, 0] = (G - 1) - idx_t[:, 0]
-                    if flip_mask & 2:
-                        idx_t[:, 1] = (G - 1) - idx_t[:, 1]
-                    if flip_mask & 4:
-                        idx_t[:, 2] = (G - 1) - idx_t[:, 2]
-                lin = idx_t[:, 0] * G * G + idx_t[:, 1] * G + idx_t[:, 2]
-                if lin.numel() == 0:
-                    continue
-                overlap = occ_ref[lin].sum().item()
-                ratio = overlap / float(lin.numel())
-                recall = overlap / float(lin_ref.numel())
-                if best is None or ratio > best["ratio"]:
-                    perm_str = "".join(axes[i] for i in perm)
-                    flip_str = "".join("-" if (flip_mask >> i) & 1 else "+" for i in range(3))
-                    best = {
-                        "ratio": ratio,
-                        "recall": recall,
-                        "perm": perm_str,
-                        "flip": flip_str,
-                    }
-        return best
 
     def _compute_teacher_latents(self, scene_graphs: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.teacher_scene_use:
             sparse = scene_graphs["tot_obj_splat"].to(self.device)
             with torch.no_grad():
                 latents_sparse = self.teacher_encoder(sparse, sample_posterior=False)
+                # latents_sparse = sparse
             return latents_sparse.coords, latents_sparse.feats
 
         scene_ids = scene_graphs["scene_ids"]
@@ -733,24 +706,6 @@ class Trainer(EpochBasedTrainer):
         batch_splat = batch_splat.to(self.device)
         with torch.no_grad():
             latents_sparse = self.teacher_encoder(batch_splat, sample_posterior=False)
-        # if overlap_den.item() > 0 and self.teacher_overlap_log_every > 0:
-        #     self._teacher_overlap_step += 1
-        #     if self._teacher_overlap_step % self.teacher_overlap_log_every == 0:
-        #         ratio = (overlap_num / overlap_den).item()
-        #         recall = (overlap_num / overlap_gt).item() if overlap_gt.item() > 0 else 0.0
-        #         self.logger.info(
-        #             f"Teacher overlap ratio: {ratio}, (recall {recall}) using {int(overlap_den.item())} voxels.",
-                    
-        #         )
-        #         if do_axis_diag and axis_diag_pairs:
-        #             max_items = max(1, self.teacher_overlap_axis_diag_max)
-        #             for i, (idx_src, idx_ref) in enumerate(axis_diag_pairs[:max_items]):
-        #                 diag = self._axis_overlap_diag(idx_src, idx_ref, self.G)
-        #                 if diag is None:
-        #                     continue
-        #                 self.logger.info(
-        #                     f"Axis-overlap diag {i}: best ratio={diag['ratio']}, recall={diag['recall']}, perm={diag['perm']} flip={diag['flip']}"
-        #                 )
         return latents_sparse.coords, latents_sparse.feats
 
     def _sparse_latent_loss(self, latent_pred: torch.Tensor, teacher_coords: torch.Tensor, teacher_feats: torch.Tensor) -> torch.Tensor:
@@ -779,7 +734,52 @@ class Trainer(EpochBasedTrainer):
             # self.logger.info(f"after shape regu, pred_sel: {pred_sel.shape}")
             # self.logger.info(f"after shape regu, feats: {feats.shape}")
         return torch.abs(pred_sel - feats).mean()
+    
+    def _latent_pred_to_teacher_sparse(
+        self,
+        latent_pred: torch.Tensor,   # [B, C, G, G, G]
+        teacher_coords: torch.Tensor,  # [N, 4] = [b, x, y, z]
+        max_latents: Optional[int] = None,
+    ) -> SparseTensor:
+        """
+        Build a SparseTensor from latent_pred sampled at teacher_coords.
 
+        Returns:
+            SparseTensor with
+            feats  = [N, C]
+            coords = [N, 4]  (batch, x, y, z)
+        """
+        device = latent_pred.device
+        dtype = latent_pred.dtype
+
+        if teacher_coords is None or teacher_coords.numel() == 0:
+            C = latent_pred.shape[1]
+            self.logger.warning(f"teacher coords missing")
+            return SparseTensor(
+                feats=torch.zeros((0, C), device=device, dtype=dtype),
+                coords=torch.zeros((0, 4), device=device, dtype=torch.int32),
+            )
+
+        coords = teacher_coords.to(device=device).long()
+        self.logger.info(f"coords shape 0: {coords.shape[0]}")
+        # optional subsampling
+        # if max_latents is not None and coords.shape[0] > max_latents:
+        #     sel = torch.randperm(coords.shape[0], device=device)[:max_latents]
+        #     coords = coords[sel]
+
+        b = coords[:, 0].clamp_(0, latent_pred.shape[0] - 1)
+        x = coords[:, 1].clamp_(0, self.G - 1)
+        y = coords[:, 2].clamp_(0, self.G - 1)
+        z = coords[:, 3].clamp_(0, self.G - 1)
+
+        # latent_pred[b, :, x, y, z] -> [N, C]
+        feats = latent_pred[b, :, x, y, z]
+
+        return SparseTensor(
+            feats=feats.contiguous(),
+            coords=coords.int(),
+        ).to(device)
+  
     def _predicted_latent_loss(
         self,
         logits: torch.Tensor,
@@ -858,6 +858,152 @@ class Trainer(EpochBasedTrainer):
         if count.item() == 0:
             return torch.zeros((), device=latent_pred.device)
         return loss_sum / (count + 1e-6)
+    # def _apply_pack_alignment(self, gauss, mean_gt: np.ndarray, scale_gt: np.ndarray) -> None:
+    #     device = gauss.get_xyz.device
+    #     gauss.rescale(torch.tensor([2.0, 2.0, 2.0], device=device))
+    #     gauss.translate(torch.tensor([-1.0, -1.0, -1.0], device=device))
+
+    #     scale_arr = np.asarray(scale_gt, dtype=np.float32)
+    #     scale_vec = torch.from_numpy(scale_arr).to(device=device).view(-1)
+    #     if scale_vec.numel() == 1:
+    #         scale_vec = scale_vec.repeat(3)
+    #     elif scale_vec.numel() > 3:
+    #         scale_vec = scale_vec[:3]
+    #     gauss.rescale(scale_vec)
+
+    #     translation = torch.as_tensor(mean_gt, device=device).view(-1)
+    #     if translation.numel() == 1:
+    #         translation = translation.repeat(3)
+    #     gauss.translate(translation)
+
+    #     self._clamp_gaussian_scale(gauss, scale_gt)
+    def _apply_pack_alignment(self, gauss, mean_gt, scale_gt) -> None:
+        device = gauss.get_xyz.device
+        dtype = gauss.get_xyz.dtype
+
+        gauss.rescale(torch.tensor([2.0, 2.0, 2.0], device=device, dtype=dtype))
+        gauss.translate(torch.tensor([-1.0, -1.0, -1.0], device=device, dtype=dtype))
+
+        scale_vec = torch.as_tensor(scale_gt, device=device, dtype=dtype).view(-1)
+        if scale_vec.numel() == 1:
+            scale_vec = scale_vec.repeat(3)
+        elif scale_vec.numel() > 3:
+            scale_vec = scale_vec[:3]
+        gauss.rescale(scale_vec)
+
+        translation = torch.as_tensor(mean_gt, device=device, dtype=dtype).view(-1)
+        if translation.numel() == 1:
+            translation = translation.repeat(3)
+        elif translation.numel() > 3:
+            translation = translation[:3]
+        gauss.translate(translation)
+
+        self._clamp_gaussian_scale(gauss, scale_vec)
+
+    # def _clamp_gaussian_scale(self, reconstruction, bbox_scale: np.ndarray) -> None:
+    #     device = reconstruction.get_xyz.device
+    #     dtype = reconstruction.get_xyz.dtype
+
+    #     if not torch.is_tensor(bbox_scale):
+    #         bbox_scale = torch.tensor(bbox_scale, device=device, dtype=dtype)
+
+    #     bbox_scale = bbox_scale.to(device=device, dtype=dtype).flatten()
+    #     if bbox_scale.numel() == 0:
+    #         return
+    #     if bbox_scale.numel() == 1:
+    #         bbox_scale = bbox_scale.repeat(3)
+    #     elif bbox_scale.numel() > 3:
+    #         bbox_scale = bbox_scale[:3]
+
+    #     max_scale = (bbox_scale / 128).clamp_min(1e-5)
+    #     current_scale = reconstruction.get_scaling
+    #     clamped = torch.minimum(current_scale, max_scale.view(1, 3))
+    #     reconstruction.from_scaling(clamped)
+    def _clamp_gaussian_scale(self, reconstruction, bbox_scale) -> None:
+        device = reconstruction.get_xyz.device
+        dtype = reconstruction.get_xyz.dtype
+
+        bbox_scale = torch.as_tensor(bbox_scale, device=device, dtype=dtype).flatten()
+        if bbox_scale.numel() == 0:
+            return
+        if bbox_scale.numel() == 1:
+            bbox_scale = bbox_scale.repeat(3)
+        elif bbox_scale.numel() > 3:
+            bbox_scale = bbox_scale[:3]
+
+        max_scale = (bbox_scale / self.G).clamp_min(1e-5)
+        current_scale = reconstruction.get_scaling
+        clamped = torch.minimum(current_scale, max_scale.view(1, 3))
+        reconstruction.from_scaling(clamped)
+
+    def _render_current_frame(
+        self,
+        gauss,
+        scan_id: str,
+        frame_id: str,
+        scene_graphs: Dict[str, Any],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # intr = scene_graphs["obj_intrinsics"][scan_id]
+        root = '/cluster/project/cvg/Shared_datasets/3RScan/'
+        intr = scan3r.load_intrinsics(osp.join(root, "scenes"), scan_id)
+        H = int(intr["height"])
+        W = int(intr["width"])
+        fx = float(intr["intrinsic_mat"][0, 0])
+        fy = float(intr["intrinsic_mat"][1, 1])
+        K = intr["intrinsic_mat"]
+
+        fovx = focal2fov(fx, W)
+        fovy = focal2fov(fy, H)
+
+        # extr = scene_graphs["image_poses"][scan_id][frame_id]
+        # pose_camera_to_world = np.linalg.inv(extr)
+        extr = scan3r.load_frame_poses(root, scan_id, (frame_id,))
+        extr = extr[frame_id]
+        # self.logger.info(f"extr:{extr}")
+        pose_camera_to_world = np.linalg.inv(extr)
+        camera = MiniCam2(
+            width=W,
+            height=H,
+            fovy=fovy,
+            fovx=fovx,
+            znear=0.01,
+            zfar=100.0,
+            R=pose_camera_to_world[:3, :3].T,
+            T=pose_camera_to_world[:3, 3],
+            K=K,
+        )
+
+        pred = render(
+            camera,
+            gauss,
+            pipe=self._pipe_cfg,
+            bg_color=torch.tensor((0.0, 0.0, 0.0), device=self.device),
+        )["render"]
+
+        # img_path = osp.join(root,'scenes', 'sequence',scan_id,frame_id,'.color.jpg')
+        img_path = os.path.join(
+            root,
+            "scenes",
+            scan_id,
+            "sequence",
+            f"frame-{frame_id}.color.jpg"
+        )
+        gt = Image.open(img_path).convert("RGB")
+        gt = torch.from_numpy(np.array(gt)).permute(2, 0, 1).float().to(self.device) / 255.0
+        return pred, gt
+
+    def _photometric_loss(
+        self,
+        pred: torch.Tensor,
+        gt: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if mask is not None:
+            while mask.ndim < pred.ndim:
+                mask = mask.unsqueeze(0)
+            return (torch.abs(pred - gt) * mask).sum() / (mask.sum() * pred.shape[0] + 1e-6)
+        return torch.abs(pred - gt).mean()
+
 
     def _forward_batch(
         self,
@@ -868,14 +1014,54 @@ class Trainer(EpochBasedTrainer):
         if teacher_coords is None:
             self.logger.warning("Skipping batch because teacher voxels were missing.")
             return {}, {}
-        # self.logger.info(f"x_in: {x_in.shape}")
-        # self.logger.info(f"x_in[0]: {x_in[0].shape}")
+
         logits_full = self.model(x_in)
         logits = logits_full[:, :1]
         latent_pred = logits_full[:, 1:]
-        # self.logger.info(f"latent_pred, {latent_pred.shape}")
-        # self.logger.info(f"latent_pred[0], {latent_pred[0].shape}")
+        photo_loss = torch.zeros((), device=latent_pred.device)
+        if self.photometric:
+            # pred_idx = (logits[0,0].sigmoid() > 0.5).nonzero(as_tuple=False)
+            sparse_latent = self._latent_pred_to_teacher_sparse(latent_pred, teacher_coords)
+            reconstruction = self.teacher.decode(sparse_latent)
+            photo_terms = []
+            B = len(scene_graphs["scene_ids"])
+            for b in range(B):
+                sid = scene_graphs["scene_ids"][b][0]
+                fid = str(scene_graphs["frame_ids"][b]).zfill(6)
+                gauss_b = reconstruction[b]
+                self.logger.info(f"student_mean_gt: {scene_graphs['student_mean_gt'][b]}" )
+                self.logger.info(f"student_scale_gt: {scene_graphs['student_scale_gt'][b]}" )
+                self._apply_pack_alignment(
+                    gauss_b,
+                    scene_graphs["student_mean_gt"][b].to(self.device),
+                    scene_graphs["student_scale_gt"][b].to(self.device),
+                )
 
+                gauss_params = [
+                    gauss_b.get_xyz,
+                    gauss_b.get_scaling,
+                    gauss_b.get_rotation,
+                    gauss_b.get_opacity,
+                    gauss_b.get_features,
+                ]
+                if gauss_b.get_xyz.numel() == 0 or any(not torch.isfinite(p).all() for p in gauss_params):
+                    self.logger.warning(f"Skipping photometric loss for {sid}: Gaussians are empty or contain NaN/Inf")
+                    continue
+
+                try:
+                    pred_img, gt_img = self._render_current_frame(gauss_b, sid, fid, scene_graphs)
+                    photo_terms.append(self._photometric_loss(pred_img, gt_img))
+                except RuntimeError as e:
+                    self.logger.warning(f"Render failed for {sid}/{fid}, skipping photometric loss: {e}")
+                frame_ids = scan3r.load_frame_idxs(
+                    osp.join(self.cfg.data.root_dir, "scenes"), sid
+                )
+                # fid_2 = random.choice(frame_ids)
+                # pred_img, gt_img = self._render_current_frame(gauss_b, sid, fid_2, scene_graphs)
+                # photo_terms.append(self._photometric_loss(pred_img, gt_img))
+            photo_loss = torch.stack(photo_terms).mean() if photo_terms else torch.zeros((), device=self.device)
+            # return torch.stack(photo_terms).mean()
+            # self.logger.info(f"reconstruction shape: {reconstruction.shape}")
         mask_complete = (1 - occ_vis) + 0.3 * (F.max_pool3d(occ_vis, 3, 1, 1) - occ_vis).clamp_min(0)
         mask_complete = mask_complete.clamp_max(1.0)
         bce = F.binary_cross_entropy_with_logits(logits, occ_gt, reduction="none")
@@ -908,6 +1094,7 @@ class Trainer(EpochBasedTrainer):
             + self.lambda_dice * dice_loss
             + self.latent_weight * latent_loss
             + self.latent_pred_weight * latent_pred_loss
+            + photo_loss
         )
 
         loss_dict = {
@@ -916,16 +1103,27 @@ class Trainer(EpochBasedTrainer):
             "dice": dice_loss,
             "latent_l1": latent_loss,
             "latent_pred_l1": latent_pred_loss,
+            "photo_loss": photo_loss,
             "IoU @ 0.3": iou_metrics[0.3].item(),
             "IoU @ 0.5": iou_metrics[0.5].item(),
             "IoU @ 0.7": iou_metrics[0.7].item(),
         }
-
-        output_dict = {
-            "logits": logits[: min(x_in.shape[0], 4)].detach().cpu(),
-            "occ_gt": occ_gt[: min(x_in.shape[0], 4)].detach().cpu(),
-            "occ_vis": occ_vis[: min(x_in.shape[0], 4)].detach().cpu(),
-        }
+        if self.photometric:
+            output_dict = {
+                "logits": logits[: min(x_in.shape[0], 4)].detach().cpu(),
+                "occ_gt": occ_gt[: min(x_in.shape[0], 4)].detach().cpu(),
+                "occ_vis": occ_vis[: min(x_in.shape[0], 4)].detach().cpu(),
+                "predicted_image": pred_img.detach().cpu(),
+                "ground_truth_images": gt_img.detach().cpu(),
+                "gaussian": gauss_b
+            }
+        else:  
+            output_dict = {
+                "logits": logits[: min(x_in.shape[0], 4)].detach().cpu(),
+                "occ_gt": occ_gt[: min(x_in.shape[0], 4)].detach().cpu(),
+                "occ_vis": occ_vis[: min(x_in.shape[0], 4)].detach().cpu(),
+               
+            }
         return output_dict, loss_dict
 
     def train_step(
@@ -961,6 +1159,13 @@ class Trainer(EpochBasedTrainer):
         occ_vis = output_dict["occ_vis"]
         B = logits.shape[0]
         thr = 0.5
+        if self.photometric:
+            predicted_images = output_dict["predicted_image"]
+            ground_truth_images = output_dict["ground_truth_images"]
+            output_dict["gaussian"].save_ply(
+                    f"{self.cfg.output_dir}/events/reconstruction.ply"
+                )
+            
         for i in range(B):
             pr_idx = (logits[i, 0].sigmoid() > thr).nonzero(as_tuple=False)
             gt_idx = (occ_gt[i, 0] > thr).nonzero(as_tuple=False)
@@ -969,12 +1174,42 @@ class Trainer(EpochBasedTrainer):
             save_vox_as_ply(pr_idx, self.G, f"{outdir}/{mode}_pred_{i}.ply")
             save_vox_as_ply(vis_idx, self.G, f"{outdir}/{mode}_input_{i}.ply")
             sbs = side_by_side(occ_gt[i, 0], logits[i, 0], max_slices=6)
+            if self.photometric:
+                
+                sbs_2 = torch.concat(
+                    [ground_truth_images, predicted_images],
+                    dim=-1,
+                )
+                sbs_2 = sbs_2.unsqueeze(0)   
+                scale = 0.3
+                sbs_small = F.interpolate(
+                    sbs_2,
+                    scale_factor=scale,
+                    mode="bilinear",
+                    align_corners=False,
+                    antialias=True,
+                ).clamp(0, 1)
+                save_image(
+                    predicted_images,
+                    f"{self.cfg.output_dir}/events/{mode}_predicted_images.png",
+                )
+                save_image(
+                    ground_truth_images,
+                    f"{self.cfg.output_dir}/events/{mode}_ground_truth_images.png",
+                )
             self.writer.add_image(
                 f"{mode}/slices_{i}_gt_pred",
                 sbs.unsqueeze(1),
                 global_step=epoch,
                 dataformats="NCHW",
             )
+                # self.writer.add_image(
+                #     f"{mode}/slices_{i}_gt_pred",
+                #     sbs_small,
+                #     global_step=epoch,
+                #     dataformats="NCHW",
+                # )
+                
 
 
 def parse_args(parser: argparse.ArgumentParser = None):

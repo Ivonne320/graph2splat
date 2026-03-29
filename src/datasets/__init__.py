@@ -4,4 +4,7 @@ from .scan3r_obj_patch import Scan3RPatchObjectDataset
 from .scan3r_scene import Scan3RSceneGraphDataset
 from .scannet_obj import ScannetObjectDataset
 from .scan3r_obj_patch_modified import Scan3RPatchObjectModifiedDataset
+# from .scan3r_scene_batch_align import Scan3RSceneBatchDataset
 from .scan3r_scene_batch import Scan3RSceneBatchDataset
+from .scan3r_scene_batch_single_image import Scan3RSceneBatchSingleDataset
+from .scannet_scene_batch import ScanNetSceneBatchDataset

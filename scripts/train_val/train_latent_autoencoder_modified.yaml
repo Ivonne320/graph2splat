@@ -4,7 +4,7 @@ data :
   rescan: True
   temporal: False
   resplit: True
-  preload_masks: True
+  preload_masks: False
   from_gt: True
   img:
     img_step: 1
@@ -40,6 +40,7 @@ data :
 # for scene graph embedding
 autoencoder:
   guidance:             False
+  train_structure:      False
   encoder:
     rel_dim             : 41
     use_splat           : False
@@ -153,9 +154,9 @@ seed: 42
 train:
   train_decoder: True
   freeze_encoder: True
-  checkpoint_path : '/home/yihan/graph2splat/pretrained/training_scene_decoder/2025-07-28_02-26-31/snapshots/epoch-1000.pth.tar'
+  checkpoint_path : '/cluster/scratch/wangyih/overfitting_dataset/pretrained/slat_pretrained.pth.tar'
 
-  clip_grad: 0.1
+  clip_grad: 0.5
   pc_res: 512
   aux_channels: 0
   batch_size: 1
@@ -163,12 +164,12 @@ train:
   use_pretrained: False
   visualize_steps: 1
   val_steps: 1
-  snapshot_steps: 500
+  snapshot_steps: 20
   optim:
-    lr: 0.0005
+    lr: 0.0004
     scheduler: "step"
-    lr_decay: 0.999
-    lr_decay_steps: 1
+    lr_decay: 0.97
+    lr_decay_steps: 100
     lr_min: 0.00001
     T_max: 1000
     T_mult: 1

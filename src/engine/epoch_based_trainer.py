@@ -436,5 +436,5 @@ class EpochBasedTrainer(BaseTrainer):
             if self.mode == "train" or self.mode == "debug_few_scan":
                 self.train_epoch()
             if (self.epoch - 1) % self.val_steps == 0:
-                # self.inference_epoch()
-                pass
+                self.inference_epoch()
+                # pass

@@ -407,8 +407,8 @@ class Scan3RSceneBatchSingleDataset(data.Dataset):
             # txt_path =  '/cluster/project/cvg/Shared_datasets/3RScan/files/reproj_train_processed_gs_annotations.txt'
             # with open(txt_path, "r") as f:
             #     self.scan_ids = [line.strip() for line in f if line.strip()]
-            self._filter_missing_splats()
-            self.scan_ids = self.scan_ids[:10]
+            # self._filter_missing_splats()
+            self.scan_ids = self.scan_ids[:400][::2]
             # self.scan_ids = ['fcf66d9e-622d-291c-84c2-bb23dfe31327','02b33dfb-be2b-2d54-92d2-cd012b2b3c40','02b33dfd-be2b-2d54-91d2-55454852009e','fcf66d88-622d-291c-871f-699b2d063630']
             _LOGGER.info(f"scan_ids: {self.scan_ids}")
 
@@ -769,19 +769,26 @@ class Scan3RSceneBatchSingleDataset(data.Dataset):
             return str(int(frame_id.reshape(-1)[0])).zfill(6)
         return str(frame_id).zfill(6)
 
+    # def _load_dino_tokens_tensor(self, pack_path: str, frame_id: str) -> torch.Tensor:
+    #     base = osp.dirname(pack_path)
+    #     key = (base, frame_id)
+    #     cached = self._dino_token_cache.get(key)
+    #     if cached is not None:
+    #         return cached
+    #     tokens_path = osp.join(base, f"dino_tokens_{frame_id}.npy")
+    #     if not osp.isfile(tokens_path):
+    #         raise FileNotFoundError(f"Missing DINO tokens file: {tokens_path}")
+    #     arr = np.load(tokens_path, mmap_mode="r")
+    #     tensor = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0)
+    #     self._dino_token_cache[key] = tensor
+    #     return tensor
     def _load_dino_tokens_tensor(self, pack_path: str, frame_id: str) -> torch.Tensor:
         base = osp.dirname(pack_path)
-        key = (base, frame_id)
-        cached = self._dino_token_cache.get(key)
-        if cached is not None:
-            return cached
         tokens_path = osp.join(base, f"dino_tokens_{frame_id}.npy")
         if not osp.isfile(tokens_path):
             raise FileNotFoundError(f"Missing DINO tokens file: {tokens_path}")
         arr = np.load(tokens_path, mmap_mode="r")
-        tensor = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0)
-        self._dino_token_cache[key] = tensor
-        return tensor
+        return torch.from_numpy(arr).unsqueeze(0)
 
     def _sample_features_from_grid(self, pack: dict, sample_grid_np: np.ndarray) -> np.ndarray:
         pack_path = pack.get("__path__")

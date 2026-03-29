@@ -19,7 +19,7 @@ from tqdm import tqdm
 from configs import Config, update_configs
 from utils import common, scan3r
 from utils import visualisation as vis
-from utils.pcd_alignment import *
+# from utils.pcd_alignment import *
 import cv2
 from scipy.ndimage import map_coordinates
 from scipy.spatial import cKDTree
@@ -570,8 +570,8 @@ if __name__ == "__main__":
     root_dir = cfg.data.root_dir
 
     # model = torch.hub.load("facebookresearch/dinov2", args.model)
-    model = torch.hub.load("/home/yihan/.cache/torch/hub/facebookresearch_dinov3_main", args.model, source='local', pretrained=False)
-    ckpt_path = "/home/yihan/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    model = torch.hub.load("/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main", args.model, source='local', pretrained=False)
+    ckpt_path = "/cluster/home/wangyih/.cache/torch/hub/facebookresearch_dinov3_main/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
     ckpt = torch.load(ckpt_path, map_location="cpu")
     state_dict = ckpt.get("model", ckpt)
     model.load_state_dict(state_dict, strict=False)

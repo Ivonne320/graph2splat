@@ -34,20 +34,40 @@ from utils.graphics_utils import focal2fov
 from utils.loss_utils import ssim
 
 
-def psnr_b(img1: torch.Tensor, img2: torch.Tensor, eps: float = 1e-8) -> Tuple[torch.Tensor, torch.Tensor]:
+# def psnr_b(img1: torch.Tensor, img2: torch.Tensor, eps: float = 1e-8) -> Tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     b.psnr implementation:
+#       mse = mean over pixels per image (B,)
+#       psnr = 20*log10(1/sqrt(mse)) per image (B,)
+#     Assumes inputs are in [0,1]. Returns (psnr_per_img, mse_per_img).
+#     """
+#     if img1.dim() == 3:
+#         img1 = img1.unsqueeze(0)
+#     if img2.dim() == 3:
+#         img2 = img2.unsqueeze(0)
+#     # mse = ((img1 - img2) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True).clamp_min(eps)
+#     mse = F.mse_loss(img1, img2)
+#     psnr = 20.0 * torch.log10(1.0 / torch.sqrt(mse))
+#     return psnr, mse
+def psnr_b(
+    img1: torch.Tensor,
+    img2: torch.Tensor,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    b.psnr implementation:
-      mse = mean over pixels per image (B,)
-      psnr = 20*log10(1/sqrt(mse)) per image (B,)
-    Assumes inputs are in [0,1]. Returns (psnr_per_img, mse_per_img).
+    Compute per-image PSNR.
+    Inputs: (B,C,H,W) or (C,H,W), assumed in [0,1].
+    Returns:
+        psnr: (B,)
+        mse:  (B,)
     """
     if img1.dim() == 3:
         img1 = img1.unsqueeze(0)
     if img2.dim() == 3:
         img2 = img2.unsqueeze(0)
-    # mse = ((img1 - img2) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True).clamp_min(eps)
-    mse = F.mse_loss(img1, img2)
-    psnr = 20.0 * torch.log10(1.0 / torch.sqrt(mse))
+
+    mse = ((img1 - img2) ** 2).flatten(1).mean(dim=1)   # (B,)
+    psnr = 20.0 * torch.log10(1.0 / torch.sqrt(mse.clamp_min(eps)))
     return psnr, mse
 # def masked_psnr_b(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8):
 #     """
@@ -133,7 +153,7 @@ def clamp_gaussian_scale(reconstruction: Gaussian, bbox_scale: torch.Tensor) -> 
         bbox_scale = bbox_scale.repeat(3)
     elif bbox_scale.numel() > 3:
         bbox_scale = bbox_scale[:3]
-    max_scale = 1.2 * (bbox_scale / 256.0).clamp_min(1e-7)
+    max_scale = 1.2 * (bbox_scale / 128.0).clamp_min(1e-7)
     # self.logger.info(f"max_scale:{max_scale}")
     # max_scale = torch.nan_to_num(max_scale, nan=1e-3, posinf=1e-3, neginf=1e-3)
     min_allowed = 2e-4 + 1e-6
@@ -257,8 +277,8 @@ def main() -> None:
             scene_graphs = data_dict["scene_graphs"]
             scales = scene_graphs["scale_obj_splat"]
             # ref_ids = scene_graphs['ref_ids']
-            # embedding = model.encode(data_dict)
-            embedding = data_dict["scene_graphs"]["tot_obj_splat"] 
+            embedding = model.encode(data_dict)
+            # embedding = data_dict["scene_graphs"]["tot_obj_splat"] 
             # embedding = append_log_scale_to_sparse(embedding, scales)
             reconstruction = model.decode(embedding)
 

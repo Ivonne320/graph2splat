@@ -5,6 +5,8 @@ import os
 import time
 import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Tuple
+import torch.nn.functional as F
+import os.path as osp
 
 from gaussian_renderer import render
 from scene.cameras import MiniCam
@@ -50,7 +52,7 @@ class Trainer(EpochBasedTrainer):
         # Model Specific params
         self.root_dir = cfg.data.root_dir
         self.cfg = cfg
-        self.cfg.data.preload_slat = True
+        self.cfg.data.preload_slat = False
         self.root_dir = cfg.data.root_dir
         self.modules: list = cfg.autoencoder.encoder.modules
 
@@ -159,32 +161,38 @@ class Trainer(EpochBasedTrainer):
         else:
             model = LatentAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
 
+        model.load_state_dict(
+            torch.load(
+                "/cluster/scratch/wangyih/overfitting_dataset/pretrained/slat_pretrained.pth.tar", map_location=self.device
+            )["model"]
+        )
         # model.load_state_dict(
         #     torch.load(
-        #         "/home/yihan/graph2splat/pretrained/training_scene_decoder/2025-08-04_04-40-51/snapshots/epoch-1500.pth.tar", map_location=self.device
+        #         "/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_scene_decoder_scene_level/2025-10-05_17-33-25/snapshots/snapshot.pth.tar", map_location=self.device
         #     )["model"]
         # )
-        state_dict = torch.load("pretrained/slat_pretrained.pth.tar", map_location=self.device)["model"]
-        encoder_dict = {
-            k.replace("encoder.", ""): v for k, v in state_dict.items() if k.startswith("encoder.")
-        }
-        model.encoder.load_state_dict(encoder_dict, strict=True)
-        decoder_dict = {
-            k.replace("decoder.", ""): v for k, v in state_dict.items() if k.startswith("decoder.")
-        }
-        decoder_dict_filtered = {
-            k: v for k, v in decoder_dict.items()
-            if not k.startswith("out_layer.weight") and not k.startswith("out_layer.bias")
-        }
-        model.decoder.load_state_dict(decoder_dict_filtered, strict=False)
-        self.init_sh_weights(model)
-        model.decoder.convert_to_fp16()
-        model.encoder.convert_to_fp16()
-        if self.cfg.train.freeze_encoder:
-            assert model is not None and isinstance(model, LatentAutoencoder)
-            for param in model.encoder.parameters():
-                param.requires_grad = False
+        
+        # if self.cfg.train.checkpoint_path is not None and os.path.exists(self.cfg.train.checkpoint_path):
+        # if True:
+        if False:
+            print(f"Loading checkpoint from: {self.cfg.train.checkpoint_path }")
+            # checkpoint = torch.load(self.cfg.train.checkpoint_path  , map_location=self.device)
+            checkpoint = torch.load('/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_scene_decoder_scene_level/2025-10-05_17-33-25/snapshots/snapshot.pth.tar'  , map_location=self.device)
 
+            # You must ensure this matches how the model was saved
+            model.load_state_dict(checkpoint["model"], strict=False)
+
+            if hasattr(self, "optimizer") and "optimizer" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+
+            if hasattr(self, "scheduler") and "scheduler" in checkpoint:
+                self.scheduler.load_state_dict(checkpoint["scheduler"])
+
+            if "epoch" in checkpoint:
+                self.start_epoch = checkpoint["epoch"] + 1
+            else:
+                self.start_epoch = 0
+        
         self.perceptual_loss = LPIPS()
         message: str = "Model created"
         self.logger.info(message)
@@ -206,7 +214,14 @@ class Trainer(EpochBasedTrainer):
                 return extrinsics
             else:
                 raise ValueError(f"Frame {frame_id} not found in scene {scene_id}.")
-
+    def get_unique_frame_ids(self, frames, scene_id):
+        frame_id_set = {
+            frame_id
+            for obj_id in frames[scene_id]
+            for frame_id in frames[scene_id][obj_id]
+        }
+        return list(frame_id_set)
+    
     def train_step(
         self, epoch: int, iteration: int, data_dict: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -217,31 +232,20 @@ class Trainer(EpochBasedTrainer):
         obj_ids = data_dict["scene_graphs"]["obj_ids"]
         intrinsic = data_dict["scene_graphs"]["obj_intrinsics"]
         frames = data_dict["scene_graphs"]["obj_img_top_frames"]
-        masks = data_dict["scene_graphs"]["obj_annos"]
+        # masks = data_dict["scene_graphs"]["obj_annos"]
         translations = data_dict["scene_graphs"]["mean_obj_splat"]
         scales = data_dict["scene_graphs"]["scale_obj_splat"]
-        held_out_idxs = data_dict["held_out_idxs"]
-        # data_dict["scene_graphs"]["tot_obj_splat"] =  data_dict["scene_graphs"]["tot_obj_splat"][0]
+        print('scales0:', scales[0])
+        print('scales1:', scales[1])
+        # held_out_idxs = data_dict["held_out_idxs"]
+        data_dict["scene_graphs"]["tot_obj_splat"] =  data_dict["scene_graphs"]["tot_obj_splat"][0]
         # with torch.no_grad():
-        #     embedding = self.model.encode(data_dict)
-        # embedding = self.random_subsample_sparse_tensor(sparse_tensor=embedding)
-        # embedding = embedding[0]
-        embedding = data_dict["scene_graphs"]["tot_obj_splat"]
-        # images = visualize_object_embeddings(data_dict=data_dict, embedding=embedding)
-        # plt.show(images)
+        embedding = self.model.encode(data_dict)
         
         print(embedding.shape)
         print(scene_ids)
-       
-        scene_splat, scene_mean, scene_scale = revoxelize_scene_via_normalized_coords(  
-            splat=embedding,
-            means=translations,
-            scales=scales[:, None].repeat(1, 3)  # [B, 3]
-        )
-        # scene_splat = embedding
-        # visualize_slat_alignment(slat_tensor=scene_splat, obj_idx=3, out_dir = "pretrained/training_scene_decoder/debug/vis/")
-        reconstruction = self.model.decode(scene_splat)
-        # reconstruction = self.model.decode(embedding)
+        self.logger.info(f"scene_id: {scene_ids}")
+        reconstruction = self.model.decode(embedding)
         predicted_images = []
         ground_truth_images = []
         ground_truths = [] 
@@ -252,20 +256,29 @@ class Trainer(EpochBasedTrainer):
         reconstruction[0].translate(
                 -torch.tensor([1, 1, 1], device=reconstruction[0].get_xyz.device)
             )
-        reconstruction[0].rescale(scene_scale)
-        reconstruction[0].translate(scene_mean)
+        reconstruction[0].rescale(scales[0])
+        reconstruction[0].translate(translations[0])
     
         scene_id = scene_ids[0][0]
-        random_frame_ids = random.sample(held_out_idxs[scene_id], 6)
-        for i in range(len(random_frame_ids)):
-            # scene_id = scene_ids[0][0]
-            # obj_id = obj_ids[i]
+        # random_frame_ids = random.sample(held_out_idxs[scene_id], 6)
+        # frame_ids=self.get_unique_frame_ids(frames, scene_id) 
+        scenes_dir = osp.join(self.cfg.data.root_dir, "scenes")
+        frame_ids = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scene_id)
+        if len(frame_ids) > 150:
+            frame_ids = frame_ids[:150]
+        if len(frame_ids) > 4:
+            selected_frame_ids = random.sample(frame_ids, 4)
+        else:
+            selected_frame_ids = frame_ids
+        
+        extrinsics_frames = scan3r.load_frame_poses(
+            '/cluster/project/cvg/Shared_datasets/3RScan/', scene_id, tuple(selected_frame_ids), type="quat_trans"
+          
+        )
+        for i in range(len(selected_frame_ids)):
             intrinsics = intrinsic[scene_id]
-            # pose_idx = np.random.randint(0, len(img_poses[scene_id][obj_id]))
-            # frame_id = frames[scene_id][obj_id][pose_idx]
-            frame_id =random_frame_ids[i]   
-            # extrinsics = img_poses[scene_id][obj_id][pose_idx]
-            extrinsics = self.get_extrinsics_by_frame_id(scene_id=scene_id, frame_id=frame_id, frames = frames, img_poses=img_poses)
+            frame_id =selected_frame_ids[i]   
+            extrinsics = extrinsics_frames[frame_id]
             image = Image.open(
                 f"{self.cfg.data.root_dir}/scenes/{scene_id}/sequence/frame-{frame_id}.color.jpg"
             )
@@ -300,17 +313,21 @@ class Trainer(EpochBasedTrainer):
                 zfar=100.0,
                 R=pose_camera_to_world[:3, :3].T,
                 T=pose_camera_to_world[:3, 3],
-                # projection_matrix = projection_matrix
-                # world_view_transform=world_view_transform,
-                # full_proj_transform=full_proj_transform,
     
             )
             
-            pipe_cfg = Namespace(
-                debug=False,
-                compute_cov3D_python=False,
-                convert_SHs_python=True
-            )
+            if self.cfg.autoencoder.sh_degree == 0:
+                pipe_cfg = Namespace(
+                    debug=False,
+                    compute_cov3D_python=False,
+                    convert_SHs_python=False
+                )
+            else:
+                pipe_cfg = Namespace(
+                    debug=False,
+                    compute_cov3D_python=False,
+                    convert_SHs_python=True
+                )
 
             rendered_image = render(
                 viewpoint_camera,
@@ -318,6 +335,7 @@ class Trainer(EpochBasedTrainer):
                 pipe = pipe_cfg,
                 bg_color=torch.tensor((0.0, 0.0, 0.0), device="cuda"),
             )["render"]
+            rendered_image = torch.nan_to_num(rendered_image, nan=0.0, posinf=1.0, neginf=0.0).clamp(0,1)
 
             predicted_images.append(rendered_image)
             ground_truth_images.append(image)
@@ -330,25 +348,42 @@ class Trainer(EpochBasedTrainer):
         protometric_loss = 0.8 * l1_loss(
             predicted_images, ground_truth_images
         ) + 0.2 * (1.0 - ssim(predicted_images, ground_truth_images))
-        perceptual_loss = self.perceptual_loss(predicted_images, ground_truth_images)
+        # perceptual_loss = self.perceptual_loss(predicted_images, ground_truth_images)
+        pred_for_lpips = torch.clamp(predicted_images * 2 - 1, -1.0, 1.0)
+        gt_for_lpips = torch.clamp(ground_truth_images * 2 - 1, -1.0, 1.0)
+        # if torch.isnan(pred_for_lpips).any() or torch.isinf(pred_for_lpips).any():
+        #     print("NaNs or Infs in predicted image before LPIPS!")
+        #     print("predicted_images stats:", predicted_images.min(), predicted_images.max())
+
+        # if torch.isnan(gt_for_lpips).any() or torch.isinf(gt_for_lpips).any():
+        #     print("NaNs or Infs in ground truth image before LPIPS!")
+        #     print("ground_truth_images stats:", ground_truth_images.min(), ground_truth_images.max())
+        
+        perceptual_loss = self.perceptual_loss(pred_for_lpips, gt_for_lpips)
 
         reconstruction: List[Gaussian]
-        volume_loss = torch.tensor(
+        # volume_loss = torch.tensor(
+        #     [recon.get_scaling.prod(dim=-1).mean() for recon in reconstruction]
+        # ).mean()
+        # opacity_loss = torch.tensor(
+        #     [((1 - recon.get_opacity) ** 2).mean() for recon in reconstruction]
+        # ).mean()
+        volume_loss = torch.stack(
             [recon.get_scaling.prod(dim=-1).mean() for recon in reconstruction]
         ).mean()
-        opacity_loss = torch.tensor(
+        opacity_loss = torch.stack(
             [((1 - recon.get_opacity) ** 2).mean() for recon in reconstruction]
         ).mean()
 
         loss = (
-            protometric_loss + volume_loss + 0.001 * opacity_loss + perceptual_loss
+            protometric_loss  + volume_loss + 0.01 * opacity_loss + perceptual_loss
         ) * self.cfg.train.loss.decoder_weight
         # loss = (
         #     protometric_loss + perceptual_loss
         # ) * self.cfg.train.loss.decoder_weight
         
         loss_dict = {
-            "loss": loss * 100,
+            "loss": loss*100 ,
             "l1_loss": protometric_loss,
             "volume_loss": volume_loss,
             "opacity_loss": opacity_loss,
@@ -357,8 +392,8 @@ class Trainer(EpochBasedTrainer):
         output_dict = {
             "reconstruction": reconstruction,
             "gt": ground_truths,
-            "predicted_images": predicted_images.detach().cpu(),
-            "ground_truth_images": ground_truth_images.detach().cpu(),
+            "predicted_images": predicted_images,
+            "ground_truth_images": ground_truth_images,
             "embeddings": embedding,
         }
         return output_dict, loss_dict
@@ -426,10 +461,14 @@ class Trainer(EpochBasedTrainer):
         side_by_side_images = torch.concat(
             [ground_truth_images, predicted_images],
             dim=-1,
-        )
+        )[:4]
+        scale = 0.5
+        sbs_small = F.interpolate(
+                    side_by_side_images, scale_factor=scale, mode="bilinear", align_corners=False, antialias=True
+                ).clamp(0, 1)
         self.writer.add_image(
             f"{mode}/reconstructions",
-            side_by_side_images[:4],
+            sbs_small,
             global_step=epoch,
             dataformats="NCHW",
         )

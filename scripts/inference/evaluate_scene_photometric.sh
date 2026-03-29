@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -n 1
-#SBATCH --gpus=a100-pcie-40gb:1
+#SBATCH --gpus=rtx_4090:1
 #SBATCH --time=24:00:00
 #SBATCH --tmp=15G
 #SBATCH --cpus-per-task=6
@@ -54,4 +54,4 @@ source .venv/bin/activate
 cd "$VLSG_SPACE" || { echo "Failed to change directory to $VLSG_SPACE"; exit 1; }
 export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
 # Run training script
-/cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/inference/evaluate_scene_photometric.py --config scripts/train_val/train_batch_scene_gs.yaml   --checkpoint /cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/10-clean/test-256-decoder-only/snapshots/epoch-1080.pth.tar --split train --max_frames 60 --batch_size 16 ${args[@]}
+/cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/inference/evaluate_scene_photometric.py --config scripts/train_val/train_batch_scene_gs.yaml   --checkpoint /cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/teacher/200scenes-128/snapshots/epoch-264.pth.tar --split train --max_frames 540 --batch_size 16 ${args[@]}

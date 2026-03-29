@@ -136,7 +136,7 @@ def voxelise_features(
     scenes_dir = osp.join(root_dir, "scenes")
     frame_idxs = scan3r.load_frame_idxs(data_dir=scenes_dir, scan_id=scan_id)
     extrinsics = scan3r.load_frame_poses(
-        data_dir=scenes_dir, scan_id=scan_id, frame_idxs=frame_idxs
+        data_dir=root_dir, scan_id=scan_id, frame_idxs=frame_idxs
     )
     intrinsics = scan3r.load_intrinsics(data_dir=scenes_dir, scan_id=scan_id)
     mask = scan3r.load_masks(data_dir=root_dir, scan_id=scan_id)
@@ -172,6 +172,7 @@ def voxelise_features(
                 args.model_dir,
                 "files",
                 mode,
+                'dinov3',
                 scan_id,
                 str(obj["id"]),
                 "voxel_output_dense.npz",
@@ -180,6 +181,7 @@ def voxelise_features(
                 args.model_dir,
                 "files",
                 mode,
+                'dinov3',
                 scan_id,
                 str(obj["id"]),
                 "mean_scale_dense.npz",
@@ -391,7 +393,7 @@ def parse_args() -> Tuple[Namespace, list]:
         type=str,
     )
     parser.add_argument("--model_dir", type=str, default="")
-    parser.add_argument("--model", type=str, default="dinov2_vitl14_reg")
+    parser.add_argument("--model", type=str, default="dinov3_vitl16")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--vis_dir", type=str, default="vis")
     parser.add_argument("--dry_run", action="store_true")
@@ -408,7 +410,7 @@ if __name__ == "__main__":
     cfg = update_configs(args.config, unknown, do_ensure_dir=False)
     root_dir = cfg.data.root_dir
 
-    model = torch.hub.load("facebookresearch/dinov2", args.model)
+    model = torch.hub.load("facebookresearch/dinov3", args.model)
     model.eval().cuda()
     transform = transforms.Compose(
         [

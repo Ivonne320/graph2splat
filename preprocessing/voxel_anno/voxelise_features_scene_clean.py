@@ -185,11 +185,14 @@ def voxelise_features(
         label_file_name="labels.instances.annotated.v2.ply",
     )["vertex"]["objectId"]
     object_ids = [int(obj["id"]) for obj in obj_data["objects"]]
-    scene_output_dir = osp.join(args.model_dir, "files", mode, scan_id, "scene_level_dinov2_512_no_dilation_clean")
+    scene_output_dir = osp.join(args.model_dir, "files", mode, scan_id, "scene_level_dinov2_128_no_dilation_clean")
     voxel_path = osp.join(scene_output_dir, "voxel_output_dense.npz")
     mean_scale_path=osp.join(scene_output_dir, "mean_scale_dense.npz")
 
-    
+    if not args.override and osp.isfile(voxel_path) and osp.isfile(mean_scale_path):
+        _LOGGER.info(f"Skipping {scan_id}: output files already exist.")
+        return
+
     try:
         
         # STEP 1: Segment the mesh
@@ -205,7 +208,7 @@ def voxelise_features(
         scene_mesh = o3d.geometry.TriangleMesh()
         scene_mesh.vertices = o3d.utility.Vector3dVector(vertices[selected_vertices])
         scene_mesh.triangles = o3d.utility.Vector3iVector(remapped_faces)
-        G = 512
+        G = 128
         # STEP 2: Normalize to unit cube (-0.5, 0.5)
         mean, scale = _normalize_segmented_mesh(scene_mesh)
         # STEP 3: Voxelise the mesh
@@ -382,7 +385,7 @@ def process_data(
         for scan_id in subscan_ids_generated
         for subscan_id in subscan_ids_generated[scan_id]
     ]
-    all_subscan_ids = all_subscan_ids[:100]
+    all_subscan_ids = all_subscan_ids
     for subscan_id in tqdm(all_subscan_ids):
         obj_data = next(
             obj_data

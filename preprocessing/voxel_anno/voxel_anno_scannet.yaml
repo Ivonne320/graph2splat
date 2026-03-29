@@ -8,7 +8,7 @@ registration  : False
 scan_type     : 'scan'
 
 data :
-  name            : Scannet
+  name            : ScanNet
   label_file_name : labels.instances.align.annotated.v2.ply
   pred_subfix     : inseg.ply
   resplit: True

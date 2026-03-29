@@ -58,7 +58,11 @@ class DualDecoderAutoencoder(LatentAutoencoder):
     def decode(self, x, use_complex_mask: Optional[torch.Tensor] = None):
         if use_complex_mask is None:
             # default behavior: decode everything with `decoder_sparse`
-            return self.decoder_easy(x)
+            return self.decoder_easy(x), None
+        if use_complex_mask.sum() == 0:
+            # Fallback: either skip decoding or return dummy output
+            print('use_complex mask is empty')
+            return self.decoder_easy(x), None
         
         # Optionally, split x into two groups
         mask = use_complex_mask.bool()  # shape [N]

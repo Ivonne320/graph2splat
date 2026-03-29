@@ -145,7 +145,7 @@ seed: 42
 train:
   train_decoder: True
   freeze_encoder: False
-  clip_grad: 0.1
+  clip_grad: 0.5
   pc_res: 512
   aux_channels: 0
   batch_size: 2
@@ -153,9 +153,9 @@ train:
   use_pretrained: False
   visualize_steps: 1
   val_steps: 1
-  snapshot_steps: 1
+  snapshot_steps: 100
   optim:
-    lr: 0.0001
+    lr: 0.0006
     scheduler: "step"
     lr_decay: 0.97
     lr_decay_steps: 1

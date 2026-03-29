@@ -41,7 +41,7 @@ except Exception:
 from src.models.losses.reconstruction import LPIPS
 from utils import common, scan3r
 from utils.gaussian_splatting import GaussianSplat
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, l2_loss
 from utils.graphics_utils import getProjectionMatrix
 from utils.slat_to_scene import revoxelize_to_fixed_scene_slat, revoxelize_to_fixed_scene_slat_with_aggregation, visualize_slat_alignment, revoxelize_scene_via_normalized_coords
 from utils.visualisation import visualize_object_embeddings
@@ -303,7 +303,7 @@ class Trainer(EpochBasedTrainer):
             bbox_scale = bbox_scale.repeat(3)
         elif bbox_scale.numel() > 3:
             bbox_scale = bbox_scale[:3]
-        max_scale = 1.2 * (bbox_scale / 256.0).clamp_min(1e-7)
+        max_scale = 1.2 * (bbox_scale /128.0).clamp_min(1e-7)
         # self.logger.info(f"max_scale:{max_scale}")
         # max_scale = torch.nan_to_num(max_scale, nan=1e-3, posinf=1e-3, neginf=1e-3)
         min_allowed = 2e-4 + 1e-6
@@ -345,8 +345,8 @@ class Trainer(EpochBasedTrainer):
         image_frames = data_dict["scene_graphs"]["image_frames"] 
         obj_2D_masks = data_dict["scene_graphs"]['obj_2D_masks']
         # with torch.no_grad():
-        # embedding = self.model.encode(data_dict)
-        embedding = data_dict["scene_graphs"]["tot_obj_splat"]
+        embedding = self.model.encode(data_dict)
+        # embedding = data_dict["scene_graphs"]["tot_obj_splat"]
         # embedding = self._append_log_scale_to_sparse(embedding, scales)
         reconstruction = self.model.decode(embedding)
         # for recon in reconstruction:

@@ -1,9 +1,11 @@
- # for Scan3R data
+# for Scan3R data
 data :
   name            : Scan3R
   rescan: True
   temporal: False
   resplit: True
+  preload_masks: True
+  from_gt: True
   img:
     img_step: 1
     w: 960
@@ -19,6 +21,10 @@ data :
     use_feature: False # use feature or raw image
     preload_feature: False
     feature_dir: "Features2D/DinoV2_16_9_scan" # relative to data_root_dir/files
+  cross_scene:
+    use_cross_scene: False
+    num_scenes: 1 # number of scenes
+    num_negative_samples: -1 # number of negative samples
   scene_graph:
     obj_img_patch: "Features3D/obj_dinov2_top10_l3"
     obj_topk: 10
@@ -34,17 +40,21 @@ data :
 # for scene graph embedding
 autoencoder:
   guidance:             False
+  train_structure:      False
   encoder:
     rel_dim             : 41
     use_splat           : False
     attr_dim            : 164
     img_patch_feat_dim  : 1536
     img_emb_dim: 256
+    alignment_thresh    : 0.4
     multi_view_aggregator: 'transformer'
     use_pretrained : False
     pretrained: ""
     label_file_name : labels.instances.annotated.v2.ply
     pred_subfix     : inseg.ply
+    model_name    : 'sgaligner'
+    # modules       : ['point']
     modules       : ['voxel']
     use_predicted : False
     registration  : False
@@ -73,20 +83,21 @@ autoencoder:
     # 3D obj embedding encoder
     obj:
       # embedding_dim: 100 # fixed
+      # embedding_dim: 262244
       embedding_dim: 300
       embedding_hidden_dims: [656, 656]
       encoder_dim: 656
-
-    voxel:
-      in_feature_dim: 9
-      out_feature_dim: 9
-      in_channel_res: 64
-      out_channel_res: 32
-      channels: [16, 32, 64]
+      
+    # voxel:
+    #   in_feature_dim: 9
+    #   out_feature_dim: 9
+    #   in_channel_res: 64
+    #   out_channel_res: 32
+    #   channels: [16, 32, 64]
 
   decoder:
-    net: "sparsestructuretrellis"
-    predict_eps: False
+    predict: "point_cloud"
+    cond_drop_prob: 0.1
     heads: 32
     init_scale: 0.25
     input_channels: 14 # todo(gaia): change this to the number of params of gaussian splats
@@ -95,7 +106,7 @@ autoencoder:
     output_channels: 14  # todo(gaia): change this to the number of params of gaussian splats
     time_token_cond: True
     width: 1024
-    latent_dim: 656
+    latent_dim: 356
 
     # The following parameters are used for the upsampler in Point-e
     mean_type: epsilon
@@ -107,48 +118,78 @@ autoencoder:
     s_churn: 3
     use_karras: True
 
+  upsampler:
+    channel_biases: [0.0, 0.0, 0.0, -1.0, -1.0, -1.0]
+    channel_scales: [2.0, 2.0, 2.0, 0.007843137255, 0.007843137255, 0.007843137255]
+    cond_ctx: 1024
+    cond_drop_prob: 0.1
+    heads: 8
+    init_scale: 0.25
+    input_channels: 3 # todo(gaia): change this to the number of params of gaussian splats
+    layers: 6
+    n_ctx: 512
+    output_channels: 6 # todo(gaia): change this to the number of params of gaussian splats
+    time_token_cond: True
+    width: 512
+    latent_dim: 356
+
+    # The following parameters are used for the upsampler in Point-e
+    timesteps: 512 # 1024
+    mean_type: epsilon
+    schedule: linear
+    guidance_scale: 3.0
+    sigma_min: 0.001
+    sigma_max: 160
+    s_churn: 0
+    use_karras: True
+
+# our model
+model_name    : 'ObjectPatchAligner'
+
 # implemetation
 mode: "train"
-local_rank: -1
+seed: 42
 
 # for training
 train:
+  object_level: False
   train_decoder: True
-  freeze_encoder: False
+  freeze_encoder: True
+  checkpoint_path : '/cluster/scratch/wangyih/overfitting_dataset/pretrained/slat_pretrained.pth.tar'
+
+  clip_grad: 0.1
   pc_res: 512
   aux_channels: 0
-  batch_size: 1
-  num_workers: 2
+  batch_size: 48
+  num_workers: 1
   use_pretrained: False
+  visualize_steps: 1
+  val_steps: 1
+  snapshot_steps: 40
   optim:
-    lr: 0.001
-    scheduler: "linear"
-    lr_decay: 0.97
-    lr_decay_steps: 1
-    lr_min: 0.00005
+    lr: 0.0004
+    scheduler: "step"
+    lr_decay: 0.99
+    lr_decay_steps: 100
+    lr_min: 0.00001
     T_max: 1000
     T_mult: 1
-    weight_decay: 0.01
+    weight_decay: 0.0
     max_epoch: 10500000
     free_backbone_epoch: 10500 # freeze backbone until certain epochs
-    grad_acc_steps: 1
-  val_steps: 1
-  visualize_steps: 1
-  snapshot_steps: 1
+    free_sgaligner_epoch: -1 # freeze sgaligner until certain epochs
+    grad_acc_steps: 10
   loss:
     use_temporal: True
     loss_type: "IntraContrastiveLoss"
-    decoder_weight: 1.0
-    encoder_weight: 1.0
-    rot_weight: 0.
-    scale_weight: 0.
-    opacity_weight: 0.
-    feature_weight: 0.
+    rot_weight: 0.01
+    scale_weight: 0.01
+    opacity_weight: 0.01
+    feature_weight: 0.01
     photometric_weight: 0.
     alpha: 0.5
     temperature: 0.1
     margin: 0.5
-    text_sds_loss_weight: 0.
     # Add sgaligner loss
   data_aug:
     use_aug: False
@@ -169,5 +210,5 @@ train:
 # for validation
 val:
   batch_size: 1
-  num_workers: 2
+  num_workers: 1
   pretrained: "./"

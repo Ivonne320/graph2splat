@@ -4,12 +4,24 @@ from typing import *
 
 import torch
 import torch.nn as nn
+import logging
 
 from src.modules import sparse as sp
 from src.modules.sparse.transformer import SparseTransformerBlock
 from src.modules.transformer import AbsolutePositionEmbedder
 from src.modules.utils import convert_module_to_f16, convert_module_to_f32
 
+_LOGGER = logging.getLogger(__name__)
+
+def _bad(t: torch.Tensor) -> bool:
+    return (~torch.isfinite(t)).any().item()
+
+def _sumry(t: torch.Tensor, tag: str):
+    bad = ~torch.isfinite(t)
+    M, C = t.shape
+    r0, c0 = bad.nonzero(as_tuple=False)[0].tolist() if bad.any().item() else (-1, -1)
+    _LOGGER.error("[%s] bad=%d/%d first=(row=%s,C=%s,val=%s)",
+                  tag, int(bad.sum().item()), M*C, r0, c0, (t[r0, c0].item() if r0>=0 else "n/a"))
 
 def block_attn_config(self):
     """
@@ -128,15 +140,49 @@ class SparseTransformerBase(nn.Module):
         self.apply(_basic_init)
 
     def forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        if _bad(x.feats):
+            _sumry(x.feats, "enc.input")
+            raise RuntimeError("Non-finite encoder input")
         h = self.input_layer(x)  # Maps channels to model_channels
+        if _bad(h.feats):
+            _sumry(h.feats, "enc.after_input_linear")
+            # Optional: dump weight/bias stats
+            w, b = self.input_layer.weight, self.input_layer.bias
+            _LOGGER.error("input_layer.weight any_nan=%s any_inf=%s min=%s max=%s",
+                        torch.isnan(w).any().item(), torch.isinf(w).any().item(),
+                        w.data.min().item(), w.data.max().item())
+            if b is not None:
+                _LOGGER.error("input_layer.bias any_nan=%s any_inf=%s min=%s max=%s",
+                            torch.isnan(b).any().item(), torch.isinf(b).any().item(),
+                            b.data.min().item(), b.data.max().item())
+            raise RuntimeError("Non-finite after input_layer")
+
         if self.pe_mode == "ape":
+            pos = self.pos_embedder(x.coords[:, 1:])  # same shape as h.feats
+            if _bad(pos):
+                _sumry(pos, "enc.pos_embedder_output")
+                raise RuntimeError("Non-finite pos_embedder output")
             h = h + self.pos_embedder(
                 x.coords[:, 1:]
             )  # Add absolute position embedding
+            if _bad(h.feats):
+                _sumry(h.feats, "enc.after_pos_add")
+                raise RuntimeError("Non-finite after pos add")
         h = h.type(self.dtype)
-        for block in self.blocks:
-            h = block(h)  # Apply transformer block
-        return h
+        # for block in self.blocks:
+        #     h = block(h)  # Apply transformer block
+        # return h
+         # 4) blocks one-by-one
+        for bi, block in enumerate(self.blocks):
+            h = block(h)
+            if _bad(h.feats):
+                _sumry(h.feats, f"enc.block[{bi}].output")
+                # Optional: quick param checks for that block
+                for n, p in block.named_parameters():
+                    if torch.isnan(p).any().item() or torch.isinf(p).any().item():
+                        _LOGGER.error("block[%d].%s has invalid params", bi, n)
+                raise RuntimeError(f"Non-finite after block {bi}")
+            return h
 
 
 class BaseNetwork(nn.Module):

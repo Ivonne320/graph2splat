@@ -136,9 +136,34 @@ class Trainer(EpochBasedTrainer):
             )
         else:
             model = LatentAutoencoder(cfg=self.cfg.autoencoder, device=self.device)
+            
+        if self.cfg.autoencoder.sh_degree == 0 and self.cfg.autoencoder.num_gaussians == 32:
+            model.load_state_dict(
+            torch.load(
+                "/cluster/scratch/wangyih/overfitting_dataset/pretrained/slat_pretrained.pth.tar", map_location=self.device
+            )["model"]
+        )
 
-        if self.cfg.train.freeze_encoder:
-            self.freeze_encoder()
+        # if self.cfg.train.freeze_encoder:
+        #     self.freeze_encoder()
+        if self.cfg.train.checkpoint_path is not None and os.path.exists(self.cfg.train.checkpoint_path):
+        # if False:
+            print(f"Loading checkpoint from: {self.cfg.train.checkpoint_path }")
+            checkpoint = torch.load(self.cfg.train.checkpoint_path  , map_location=self.device)
+
+            # You must ensure this matches how the model was saved
+            model.load_state_dict(checkpoint["model"], strict=False)
+
+            if hasattr(self, "optimizer") and "optimizer" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+
+            if hasattr(self, "scheduler") and "scheduler" in checkpoint:
+                self.scheduler.load_state_dict(checkpoint["scheduler"])
+
+            if "epoch" in checkpoint:
+                self.start_epoch = checkpoint["epoch"] + 1
+            else:
+                self.start_epoch = 0
 
         self.perceptual_loss = LPIPS()
         message: str = "Model created"
@@ -205,10 +230,10 @@ class Trainer(EpochBasedTrainer):
                 fovx=focal2fov(intrinsics["intrinsic_mat"][0, 0], intrinsics["width"]),
                 znear=0.01,
                 zfar=100.0,
-                # R=pose_camera_to_world[:3, :3].T,
-                # T=pose_camera_to_world[:3, 3],
-                world_view_transform=world_view_transform,
-                full_proj_transform=full_proj_transform,
+                R=pose_camera_to_world[:3, :3].T,
+                T=pose_camera_to_world[:3, 3],
+                # world_view_transform=world_view_transform,
+                # full_proj_transform=full_proj_transform,
     
             )
             reconstruction[i].rescale(
@@ -219,12 +244,19 @@ class Trainer(EpochBasedTrainer):
             )
             reconstruction[i].rescale(scales[i])
             reconstruction[i].translate(translations[i])
-            
-            pipe_cfg = Namespace(
-                debug=False,
-                compute_cov3D_python=False,
-                convert_SHs_python=False
-            )
+            if self.cfg.autoencoder.sh_degree == 0:
+                pipe_cfg = Namespace(
+                    debug=False,
+                    compute_cov3D_python=False,
+                    convert_SHs_python=False
+                )
+            else:
+                pipe_cfg = Namespace(
+                    debug=False,
+                    compute_cov3D_python=False,
+                    convert_SHs_python=True
+                )
+
 
             rendered_image = render(
                 viewpoint_camera,
@@ -252,15 +284,24 @@ class Trainer(EpochBasedTrainer):
         perceptual_loss = self.perceptual_loss(predicted_images, ground_truth_images)
 
         reconstruction: List[Gaussian]
-        volume_loss = torch.tensor(
-            [recon.get_scaling.prod(dim=-1).mean() for recon in reconstruction]
-        ).mean()
-        opacity_loss = torch.tensor(
-            [((1 - recon.get_opacity) ** 2).mean() for recon in reconstruction]
-        ).mean()
+        # volume_loss = torch.tensor(
+        #     [recon.get_scaling.prod(dim=-1).mean() for recon in reconstruction]
+        # ).mean()
+        # opacity_loss = torch.tensor(
+        #     [((1 - recon.get_opacity) ** 2).mean() for recon in reconstruction]
+        # ).mean()
+        volume_loss = torch.stack([
+            recon.get_scaling.prod(dim=-1).mean()
+            for recon in reconstruction
+        ]).mean()
+
+        opacity_loss = torch.stack([
+            ((1.0 - recon.get_opacity) ** 2).mean()
+            for recon in reconstruction
+        ]).mean()
 
         loss = (
-            protometric_loss + volume_loss + 0.001 * opacity_loss + perceptual_loss
+            protometric_loss + volume_loss + 0.005 * opacity_loss + perceptual_loss
         ) * self.cfg.train.loss.decoder_weight
         loss_dict = {
             "loss": loss * 100,
@@ -279,8 +320,8 @@ class Trainer(EpochBasedTrainer):
         return output_dict, loss_dict
 
     def after_train_step(self, epoch, iteration, data_dict, output_dict, result_dict):
-        self._save_embeddings(epoch, iteration, data_dict, output_dict)
-
+        # self._save_embeddings(epoch, iteration, data_dict, output_dict)
+        pass
     def _save_embeddings(self, epoch, iteration, data_dict, output_dict):
         scene_ids = data_dict["scene_graphs"]["scene_ids"]
         obj_ids = data_dict["scene_graphs"]["obj_ids"]
@@ -301,7 +342,8 @@ class Trainer(EpochBasedTrainer):
             return self.train_step(epoch, iteration, data_dict)
 
     def after_val_step(self, epoch, iteration, data_dict, output_dict, result_dict):
-        self._save_embeddings(epoch, iteration, data_dict, output_dict)
+        # self._save_embeddings(epoch, iteration, data_dict, output_dict)
+        pass
 
     def set_eval_mode(self) -> None:
         self.training = False

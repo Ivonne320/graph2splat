@@ -761,7 +761,7 @@ class Trainer(EpochBasedTrainer):
             )
 
         coords = teacher_coords.to(device=device).long()
-        self.logger.info(f"coords shape 0: {coords.shape[0]}")
+        # self.logger.info(f"coords shape 0: {coords.shape[0]}")
         # optional subsampling
         # if max_latents is not None and coords.shape[0] > max_latents:
         #     sel = torch.randperm(coords.shape[0], device=device)[:max_latents]
@@ -1029,8 +1029,8 @@ class Trainer(EpochBasedTrainer):
                 sid = scene_graphs["scene_ids"][b][0]
                 fid = str(scene_graphs["frame_ids"][b]).zfill(6)
                 gauss_b = reconstruction[b]
-                self.logger.info(f"student_mean_gt: {scene_graphs['student_mean_gt'][b]}" )
-                self.logger.info(f"student_scale_gt: {scene_graphs['student_scale_gt'][b]}" )
+                # self.logger.info(f"student_mean_gt: {scene_graphs['student_mean_gt'][b]}" )
+                # self.logger.info(f"student_scale_gt: {scene_graphs['student_scale_gt'][b]}" )
                 self._apply_pack_alignment(
                     gauss_b,
                     scene_graphs["student_mean_gt"][b].to(self.device),

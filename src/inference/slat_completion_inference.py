@@ -621,7 +621,8 @@ class SlatCompletionInference:
         save_json: bool = True,
     ) -> Dict[str, float]:
         eval_thr = self.eval_threshold if threshold is None else threshold
-        dataset = self._get_dataset(split=split)
+        use_obj_id_filter = getattr(self.args, "use_obj_id_filter", False)
+        dataset = self._get_dataset(split=split, use_obj_id_filter=use_obj_id_filter)
 
         total_tp = total_fp = total_fn = 0.0
         total_iou_03 = 0.0
@@ -1243,6 +1244,12 @@ def parse_args() -> Tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--render_views", type=int, default=0, help="Number of GT views to render")
     parser.add_argument("--render_from_gt_annotations", action="store_true", help="Use GT annotation render mode")
     parser.add_argument("--save_multiview_dir", type=str, default=None, help="Optional multiview output dir")
+    parser.add_argument(
+        "--use_obj_id_filter",
+        action="store_true",
+        default=False,
+        help="Evaluate with obj-id filter: GT voxels restricted to objects visible in the input frame (matches training with use_obj_id_filter=true)",
+    )
     args, unknown = parser.parse_known_args()
     
     return args, unknown

@@ -62,7 +62,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
         self.scenes_dir = osp.join(cfg.data.root_dir, "scenes")
         self.scans_files_dir_mode = osp.join(self.scans_files_dir, "orig")
         self.use_student_structure = getattr(cfg.data, "use_student_structure", True)
-        self.use_obj_id_filter = getattr(cfg.data, "use_obj_id_filter", Train)
+        self.use_obj_id_filter = getattr(cfg.data, "use_obj_id_filter", True)
         self.student_structure_format = getattr(
             cfg.data, "student_structure_format", "sparse"
         )

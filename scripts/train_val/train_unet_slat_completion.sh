@@ -47,7 +47,7 @@ timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 # export VLSG_TRAINING_OUT_DIR="$SCRATCH/training_structure_model/$timestamp"
 # export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_structure_model/2025-10-24_10_scenes_after_warm"
 # /cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/500scenes_use_obj_filter"
-export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/500scenes_use_obj_filter"
+export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/500scenes_use_obj_filter_with_gen_fix"
 # Initialize conda and activate the environment
 source .venv/bin/activate
 
@@ -56,4 +56,4 @@ cd "$VLSG_SPACE" || { echo "Failed to change directory to $VLSG_SPACE"; exit 1; 
 export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
 
 # Run training script
-/cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/trainval/train_unet_slat_completion.py --resume --config scripts/train_val/train_structure.yaml --log_steps 1 output_dir=\"$VLSG_TRAINING_OUT_DIR\" ${args[@]}
+/cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/trainval/train_unet_slat_completion.py  --config scripts/train_val/train_structure.yaml --log_steps 1 output_dir=\"$VLSG_TRAINING_OUT_DIR\" ${args[@]}

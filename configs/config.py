@@ -93,6 +93,7 @@ class DataConfig(BaseModel):
     preload_masks: bool = False
     preload_slat: bool = True
     use_student_structure: bool = False
+    use_obj_id_filter: bool = False
     single_view_supervision_frames: Optional[int] = 40
     img: ImageConfig = Field(default_factory=ImageConfig)
     cross_scene: CrossSceneConfig = Field(default_factory=CrossSceneConfig)

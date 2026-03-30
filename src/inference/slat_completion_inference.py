@@ -202,7 +202,7 @@ class SlatCompletionInference:
             len(unexpected),
         )
 
-        model.eval()
+        model.train()
         inferred_dim = self._infer_teacher_latent_dim(model.encoder)
         if inferred_dim is not None and inferred_dim != self.latent_dim:
             LOGGER.warning(

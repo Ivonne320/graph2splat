@@ -7,7 +7,7 @@ import os.path as osp
 import math
 import json
 from argparse import Namespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 from src.models.losses.reconstruction import LPIPS
 import torch.nn.functional as F
 from utils.loss_utils import ssim
@@ -58,6 +58,9 @@ class SlatCompletionInference:
         self.latent_model: Optional[LatentAutoencoder] = None
         self.dataset: Optional[Scan3RSceneBatchDataset] = None
 
+        self.use_generalization = bool(getattr(args, "generalization", False))
+        self._gen_model_dropout_p = float(getattr(args, "model_dropout_p", 0.1)) if self.use_generalization else 0.0
+
     @staticmethod
     def _idx_to_centers(idx: torch.Tensor, G: int) -> torch.Tensor:
         if idx.numel() == 0:
@@ -105,9 +108,13 @@ class SlatCompletionInference:
         scale_dst: torch.Tensor,
         G: int,
         eps: float = 1e-6,
-    ) -> torch.Tensor:
+        filter_oob: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if seed_idx.numel() == 0:
-            return seed_idx.new_zeros((0, 3))
+            empty = seed_idx.new_zeros((0, 3))
+            if filter_oob:
+                return empty, torch.zeros(0, dtype=torch.bool, device=seed_idx.device)
+            return empty
 
         c_seed = self._idx_to_centers(seed_idx, G)
 
@@ -130,6 +137,9 @@ class SlatCompletionInference:
 
         m_dst = mean_dst.view(1, 3)
         c_dst = (world - m_dst) / (2.0 * s_dst)
+        if filter_oob:
+            valid = (c_dst >= -0.5).all(dim=1) & (c_dst < 0.5).all(dim=1)
+            return self._centers_to_idx(c_dst[valid], G), valid
         return self._centers_to_idx(c_dst, G)
 
     def scatter_voxel_mean(self, idx_t: torch.Tensor, feat_t: torch.Tensor, G: int):
@@ -235,6 +245,8 @@ class SlatCompletionInference:
         model = UNetCompletionModel(
             feat_in=feat_dim,
             out_channels=1 + self.latent_dim,
+            use_instance_norm=self.use_generalization,
+            dropout_p=self._gen_model_dropout_p,
         ).to(self.device)
 
         checkpoint = self.args.unet_checkpoint
@@ -253,8 +265,13 @@ class SlatCompletionInference:
         if unexpected:
             LOGGER.info("UNet unexpected keys (first 20): %s", unexpected[:20])
 
-        model.train()
-        # model.eval()
+        # generalization model uses InstanceNorm (same behaviour in train/eval),
+        # so eval() is correct.  Legacy BatchNorm model uses train() to avoid
+        # poorly-calibrated running stats at single-sample inference.
+        if self.use_generalization:
+            model.eval()
+        else:
+            model.train()
         self.unet = model
 
     def _prepare_inputs_from_training_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
@@ -280,14 +297,16 @@ class SlatCompletionInference:
         with torch.no_grad():
             comp = self.unet.feature_compressor(seed_feats_raw).float()
 
-        idx_dst = self._remap_seed_idx_with_bbox(
-            seed_idx_raw,
-            mean_seed,
-            scale_seed,
-            mean_gt,
-            scale_gt,
-            G,
-        )
+        if self.use_generalization:
+            idx_dst, valid = self._remap_seed_idx_with_bbox(
+                seed_idx_raw, mean_seed, scale_seed, mean_gt, scale_gt, G,
+                filter_oob=True,
+            )
+            comp = comp[valid]
+        else:
+            idx_dst = self._remap_seed_idx_with_bbox(
+                seed_idx_raw, mean_seed, scale_seed, mean_gt, scale_gt, G,
+            )
 
         grid_feats, seed_occ = self.scatter_voxel_mean(idx_dst.int(), comp.float(), G)
         x_in = torch.cat([seed_occ, grid_feats], dim=1)
@@ -1250,8 +1269,17 @@ def parse_args() -> Tuple[argparse.Namespace, list[str]]:
         default=False,
         help="Evaluate with obj-id filter: GT voxels restricted to objects visible in the input frame (matches training with use_obj_id_filter=true)",
     )
+    # generalization regularisation flags (must match training flags)
+    parser.add_argument("--generalization", action="store_true", default=False,
+                        help="Enable generalisation mode: OOB seed filter, InstanceNorm, model dropout.")
+    parser.add_argument("--seed_dropout_p", type=float, default=0.4,
+                        help="Seed dropout probability used during training (informational, not used at inference).")
+    parser.add_argument("--model_dropout_p", type=float, default=0.1,
+                        help="Dropout3d probability in each DoubleConv block (generalization only).")
+    parser.add_argument("--gen_weight_decay", type=float, default=1e-4,
+                        help="AdamW weight decay when --generalization is set (informational, not used at inference).")
     args, unknown = parser.parse_known_args()
-    
+
     return args, unknown
 
 

@@ -190,6 +190,15 @@ train:
     temperature: 0.1
     margin: 0.5
     # Add sgaligner loss
+  # Generalisation regularisation. Set enable: true to activate all changes.
+  # Changes: OOB seed filtering (no corner-clamp), seed dropout, model dropout
+  # (InstanceNorm + Dropout3d), and separate weight_decay for AdamW.
+  generalization:
+    enable: false
+    seed_dropout_p: 0.4      # fraction of occupied seed voxels to zero out per step
+    model_dropout_p: 0.1     # Dropout3d probability appended to each DoubleConv block
+    weight_decay: 1.0e-4     # AdamW weight decay (overrides train.optim.weight_decay)
+
   data_aug:
     use_aug: False
     img:

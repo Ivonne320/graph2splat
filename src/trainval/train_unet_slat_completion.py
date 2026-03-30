@@ -5,7 +5,7 @@ import os
 import os.path as osp
 import time
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from argparse import Namespace
 import numpy as np
 from torchvision.utils import save_image
@@ -55,6 +55,19 @@ class Trainer(EpochBasedTrainer):
         self.latent_pred_occ_threshold = float(
             getattr(cfg.train.loss, "latent_pred_occ_threshold", 0.5)
         )
+        # --- generalization regularisation options ---
+        _gen_cfg = getattr(cfg.train, "generalization", None)
+        self.use_generalization = bool(getattr(_gen_cfg, "enable", False))
+        self.seed_dropout_p = float(getattr(_gen_cfg, "seed_dropout_p", 0.4)) if self.use_generalization else 0.0
+        self._gen_model_dropout_p = float(getattr(_gen_cfg, "model_dropout_p", 0.1)) if self.use_generalization else 0.0
+        self._gen_weight_decay = float(getattr(_gen_cfg, "weight_decay", 1e-4)) if self.use_generalization else cfg.train.optim.weight_decay
+        if self.use_generalization:
+            self.logger.info(
+                f"[generalization] seed_dropout={self.seed_dropout_p}, "
+                f"model_dropout={self._gen_model_dropout_p}, "
+                f"weight_decay={self._gen_weight_decay}"
+            )
+        # --------------------------------------------
         self.teacher_scene_use = bool(getattr(cfg.train, "teacher_scene_use", True))
         self.photometric = bool(getattr(cfg.train, "photometric", True))
         self.teacher_scene_subdir = getattr(
@@ -130,7 +143,7 @@ class Trainer(EpochBasedTrainer):
             self.model.parameters(),
             lr=cfg.train.optim.lr,
             eps=1e-8,
-            weight_decay=cfg.train.optim.weight_decay,
+            weight_decay=self._gen_weight_decay,
         )
         self._latent_mismatch_logged = False
         self.register_optimizer(optimizer)
@@ -223,6 +236,36 @@ class Trainer(EpochBasedTrainer):
         idx = torch.floor((centers + 0.5) * G).long()
         return torch.clamp(idx, 0, G - 1)
 
+    # def _remap_seed_idx_with_bbox(
+    #     self,
+    #     seed_idx: torch.Tensor,
+    #     mean_src: torch.Tensor,
+    #     scale_src: torch.Tensor,
+    #     mean_dst: torch.Tensor,
+    #     scale_dst: torch.Tensor,
+    #     G: int,
+    #     eps: float = 1e-6,
+    # ) -> torch.Tensor:
+    #     if seed_idx.numel() == 0:
+    #         return seed_idx.new_zeros((0, 3))
+    #     c_seed = self._idx_to_centers(seed_idx, G)
+    #     s_src = scale_src.view(-1)
+    #     if s_src.numel() == 1:
+    #         s_src = s_src.repeat(3)
+    #     elif s_src.numel() > 3:
+    #         s_src = s_src[:3]
+    #     s_src = torch.clamp(s_src.view(1, 3), min=eps)
+    #     m_src = mean_src.view(1, 3)
+    #     world = c_seed * (2.0 * s_src) + m_src
+    #     s_dst = scale_dst.view(-1)
+    #     if s_dst.numel() == 1:
+    #         s_dst = s_dst.repeat(3)
+    #     elif s_dst.numel() > 3:
+    #         s_dst = s_dst[:3]
+    #     s_dst = torch.clamp(s_dst.view(1, 3), min=eps)
+    #     m_dst = mean_dst.view(1, 3)
+    #     c_dst = (world - m_dst) / (2.0 * s_dst)
+    #     return self._centers_to_idx(c_dst, G)
     def _remap_seed_idx_with_bbox(
         self,
         seed_idx: torch.Tensor,
@@ -232,9 +275,22 @@ class Trainer(EpochBasedTrainer):
         scale_dst: torch.Tensor,
         G: int,
         eps: float = 1e-6,
-    ) -> torch.Tensor:
+        filter_oob: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Remap seed indices from source bbox space to destination bbox space.
+
+        When filter_oob=False (default): clamps out-of-range indices to grid
+        boundary — original behaviour.
+        When filter_oob=True (generalization mode): returns (idx_valid, valid_mask)
+        where out-of-GT-bbox seeds are dropped instead of clamped to corners.
+        Background depth points that land outside the GT object bbox are removed,
+        preventing spurious corner-artifact clusters in the input grid.
+        """
         if seed_idx.numel() == 0:
-            return seed_idx.new_zeros((0, 3))
+            empty = seed_idx.new_zeros((0, 3))
+            if filter_oob:
+                return empty, torch.zeros(0, dtype=torch.bool, device=seed_idx.device)
+            return empty
         c_seed = self._idx_to_centers(seed_idx, G)
         s_src = scale_src.view(-1)
         if s_src.numel() == 1:
@@ -252,6 +308,9 @@ class Trainer(EpochBasedTrainer):
         s_dst = torch.clamp(s_dst.view(1, 3), min=eps)
         m_dst = mean_dst.view(1, 3)
         c_dst = (world - m_dst) / (2.0 * s_dst)
+        if filter_oob:
+            valid = (c_dst >= -0.5).all(dim=1) & (c_dst < 0.5).all(dim=1)
+            return self._centers_to_idx(c_dst[valid], G), valid
         return self._centers_to_idx(c_dst, G)
 
     def scatter_voxel_mean(self, idx_t: torch.Tensor, feat_t: torch.Tensor, G: int):
@@ -360,6 +419,8 @@ class Trainer(EpochBasedTrainer):
         model = UNetCompletionModel(
             feat_in=self.seed_feat_dim,
             out_channels=out_channels,
+            use_instance_norm=self.use_generalization,
+            dropout_p=self._gen_model_dropout_p,
         ).to(self.device)
         # snapshot = getattr(self.cfg.train, "unet_completion_snapshot", None)
         # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/200scenes-debug/snapshots/epoch-15.pth.tar'
@@ -387,7 +448,7 @@ class Trainer(EpochBasedTrainer):
             f"No aligned pack found for scene {scene_id}/{frame_id} in {self.student_pack_subdirs}"
         )
 
-    def _make_batch(self, scene_graphs: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _make_batch(self, scene_graphs: Dict[str, Any], is_training: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gt_list = scene_graphs.get("student_gt_indices")
         seed_raw_list = scene_graphs.get("student_seed_indices_raw")
         seed_feat_raw_list = scene_graphs.get("student_seed_feats_raw")
@@ -446,15 +507,31 @@ class Trainer(EpochBasedTrainer):
             with torch.amp.autocast("cuda", enabled=self.use_amp, dtype=torch.float16):
                 feats_comp = self.model.feature_compressor(seed_feats_raw).float()
 
-            idx_dst = self._remap_seed_idx_with_bbox(
-                seed_idx_raw,
-                mean_seed,
-                scale_seed,
-                mean_gt,
-                scale_gt,
-                G,
-            )
+            if self.use_generalization:
+                # Filter out seeds that land outside the GT bbox after remap.
+                # Background depth points (walls, floor, ceiling) whose remapped
+                # GT-space coordinates fall outside [-0.5, 0.5] are dropped rather
+                # than clamped to grid corners, preventing spurious corner clusters.
+                idx_dst, valid = self._remap_seed_idx_with_bbox(
+                    seed_idx_raw, mean_seed, scale_seed, mean_gt, scale_gt, G,
+                    filter_oob=True,
+                )
+                feats_comp = feats_comp[valid]
+            else:
+                idx_dst = self._remap_seed_idx_with_bbox(
+                    seed_idx_raw, mean_seed, scale_seed, mean_gt, scale_gt, G,
+                )
+
             grid_feats, seed_occ = self.scatter_voxel_mean(idx_dst.int(), feats_comp, G)
+
+            if self.use_generalization and is_training and self.seed_dropout_p > 0.0:
+                # Randomly zero out occupied seed cells (both occupancy and features).
+                # Forces the model to learn shape priors rather than memorising exact
+                # per-scene seed patterns.
+                keep = (torch.rand_like(seed_occ) >= self.seed_dropout_p)
+                seed_occ = seed_occ * keep.float()
+                grid_feats = grid_feats * keep.float()
+
             occ_vis_list[-1] = seed_occ
             x_list.append(torch.cat([seed_occ, grid_feats], dim=1))
 
@@ -1008,8 +1085,9 @@ class Trainer(EpochBasedTrainer):
     def _forward_batch(
         self,
         scene_graphs: Dict[str, Any],
+        is_training: bool = True,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        occ_gt, occ_vis, x_in = self._make_batch(scene_graphs)
+        occ_gt, occ_vis, x_in = self._make_batch(scene_graphs, is_training=is_training)
         teacher_coords, teacher_feats = self._compute_teacher_latents(scene_graphs)
         if teacher_coords is None:
             self.logger.warning("Skipping batch because teacher voxels were missing.")
@@ -1149,7 +1227,7 @@ class Trainer(EpochBasedTrainer):
         with torch.no_grad():
             samples = data_dict["samples"]
             scene_graphs = self._build_scene_graphs_from_samples(samples, self.val_dataset_ref)
-            return self._forward_batch(scene_graphs)
+            return self._forward_batch(scene_graphs, is_training=False)
 
     def visualize(self, output_dict: Dict[str, Any], epoch: int, mode: str = "train") -> None:
         outdir = f"{self.cfg.output_dir}/events"

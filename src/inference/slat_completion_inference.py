@@ -253,8 +253,8 @@ class SlatCompletionInference:
         if unexpected:
             LOGGER.info("UNet unexpected keys (first 20): %s", unexpected[:20])
 
-        model.train()
-        # model.eval()
+        # model.train()
+        model.eval()
         self.unet = model
 
     def _prepare_inputs_from_training_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:

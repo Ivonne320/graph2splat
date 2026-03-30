@@ -520,7 +520,7 @@ class SlatCompletionInference:
         tp = (pred * gt_bin).sum().item()
         fp = (pred * (1.0 - gt_bin)).sum().item()
         fn = ((1.0 - pred) * gt_bin).sum().item()
-
+        # test
         precision = tp / (tp + fp + 1e-6)
         recall = tp / (tp + fn + 1e-6)
         fscore = 2 * precision * recall / (precision + recall + 1e-6)

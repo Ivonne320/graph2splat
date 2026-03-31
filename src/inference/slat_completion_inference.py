@@ -60,6 +60,8 @@ class SlatCompletionInference:
 
         self.use_generalization = bool(getattr(args, "generalization", False))
         self._gen_model_dropout_p = float(getattr(args, "model_dropout_p", 0.1)) if self.use_generalization else 0.0
+        self._gen_seed_dropout_p = float(getattr(args, "seed_dropout_p", 0.4)) if self.use_generalization else 0.0
+        self._mc_passes = int(getattr(args, "mc_passes", 1))
 
     @staticmethod
     def _idx_to_centers(idx: torch.Tensor, G: int) -> torch.Tensor:
@@ -265,11 +267,14 @@ class SlatCompletionInference:
         if unexpected:
             LOGGER.info("UNet unexpected keys (first 20): %s", unexpected[:20])
 
-        # generalization model uses InstanceNorm (same behaviour in train/eval),
-        # so eval() is correct.  Legacy BatchNorm model uses train() to avoid
-        # poorly-calibrated running stats at single-sample inference.
+        # generalization model uses InstanceNorm (same behaviour in train/eval).
+        # When mc_passes > 1 we keep train() so Dropout3d stays active and
+        # average multiple stochastic forward passes (MC dropout).
+        # With mc_passes=1 we use eval() to disable dropout for a deterministic run.
+        # Legacy BatchNorm model always uses train() to avoid poorly-calibrated
+        # running stats at single-sample inference.
         if self.use_generalization:
-            model.eval()
+            model.train() if self._mc_passes > 1 else model.eval()
         else:
             model.train()
         self.unet = model
@@ -326,11 +331,27 @@ class SlatCompletionInference:
             "meta": meta,
         }
 
+    def _apply_seed_dropout(self, x_in: torch.Tensor, p: float) -> torch.Tensor:
+        """Randomly zero occupied seed voxels in x_in (channel 0 = occupancy)."""
+        keep = (torch.rand_like(x_in[:, :1]) >= p)
+        return x_in * keep.float()
+
     def _run_unet(self, x_in: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.unet is None:
             raise RuntimeError("UNet not initialized")
         with torch.no_grad():
-            logits_full = self.unet(x_in)
+            if self._mc_passes <= 1:
+                logits_full = self.unet(x_in)
+            else:
+                # MC dropout: average logits over multiple stochastic forward passes.
+                # Both model Dropout3d and input seed dropout are applied per pass,
+                # matching the distribution seen during training.
+                acc = None
+                for _ in range(self._mc_passes):
+                    x_pass = self._apply_seed_dropout(x_in, self._gen_seed_dropout_p)
+                    out = self.unet(x_pass)
+                    acc = out if acc is None else acc + out
+                logits_full = acc / self._mc_passes
         logits = logits_full[:, :1]
         latents = logits_full[:, 1:]
         return logits, latents
@@ -1272,6 +1293,9 @@ def parse_args() -> Tuple[argparse.Namespace, list[str]]:
     # generalization regularisation flags (must match training flags)
     parser.add_argument("--generalization", action="store_true", default=False,
                         help="Enable generalisation mode: OOB seed filter, InstanceNorm, model dropout.")
+    parser.add_argument("--mc_passes", type=int, default=1,
+                        help="Number of MC-dropout forward passes to average at inference (generalization only). "
+                             "1 = deterministic eval mode. >1 = stochastic averaging with dropout active.")
     parser.add_argument("--seed_dropout_p", type=float, default=0.4,
                         help="Seed dropout probability used during training (informational, not used at inference).")
     parser.add_argument("--model_dropout_p", type=float, default=0.1,

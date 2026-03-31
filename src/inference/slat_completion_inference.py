@@ -31,6 +31,14 @@ from utils.visualisation import save_vox_as_ply
 LOGGER = logging.getLogger(__name__)
 
 
+def _prf_from_counts(tp: float, fp: float, fn: float) -> Dict[str, float]:
+    precision = tp / (tp + fp + 1e-6)
+    recall    = tp / (tp + fn + 1e-6)
+    fscore    = 2 * precision * recall / (precision + recall + 1e-6)
+    return {"tp": tp, "fp": fp, "fn": fn,
+            "precision": precision, "recall": recall, "fscore": fscore}
+
+
 class SlatCompletionInference:
     def __init__(self, cfg: Config, args: argparse.Namespace) -> None:
         self.cfg = cfg
@@ -559,14 +567,6 @@ class SlatCompletionInference:
 
     @staticmethod
     @staticmethod
-    def _prf_from_counts(tp: float, fp: float, fn: float) -> Dict[str, float]:
-        precision = tp / (tp + fp + 1e-6)
-        recall    = tp / (tp + fn + 1e-6)
-        fscore    = 2 * precision * recall / (precision + recall + 1e-6)
-        return {"tp": tp, "fp": fp, "fn": fn,
-                "precision": precision, "recall": recall, "fscore": fscore}
-
-    @staticmethod
     def _compute_prf_metrics(
         probs: torch.Tensor,
         gt: torch.Tensor,
@@ -586,33 +586,26 @@ class SlatCompletionInference:
         fp = (pred * (1.0 - gt_bin)).sum().item()
         fn = ((1.0 - pred) * gt_bin).sum().item()
 
-        out = SlatCompletionInference._prf_from_counts(tp, fp, fn)
+        out = _prf_from_counts(tp, fp, fn)
 
         if seed_occ is not None:
             seed_bin = (seed_occ > 0.5).float()
 
-            # Seen GT: ground-truth voxels that have a seed voxel present
             gt_seen   = gt_bin * seed_bin
             gt_unseen = gt_bin * (1.0 - seed_bin)
 
-            tp_s  = (pred * gt_seen).sum().item()
-            fn_s  = ((1.0 - pred) * gt_seen).sum().item()
-            # FP split: predicted voxels in seen vs unseen regions
-            fp_s  = (pred * (1.0 - gt_bin) * seed_bin).sum().item()
+            tp_s = (pred * gt_seen).sum().item()
+            fn_s = ((1.0 - pred) * gt_seen).sum().item()
+            fp_s = (pred * (1.0 - gt_bin) * seed_bin).sum().item()
 
-            tp_u  = (pred * gt_unseen).sum().item()
-            fn_u  = ((1.0 - pred) * gt_unseen).sum().item()
-            fp_u  = (pred * (1.0 - gt_bin) * (1.0 - seed_bin)).sum().item()
+            tp_u = (pred * gt_unseen).sum().item()
+            fn_u = ((1.0 - pred) * gt_unseen).sum().item()
+            fp_u = (pred * (1.0 - gt_bin) * (1.0 - seed_bin)).sum().item()
 
-            seen_counts   = int(gt_seen.sum().item())
-            unseen_counts = int(gt_unseen.sum().item())
-
-            out["seen_gt_count"]   = seen_counts
-            out["unseen_gt_count"] = unseen_counts
-            out.update({f"seen_{k}":   v for k, v in
-                        SlatCompletionInference._prf_from_counts(tp_s, fp_s, fn_s).items()})
-            out.update({f"unseen_{k}": v for k, v in
-                        SlatCompletionInference._prf_from_counts(tp_u, fp_u, fn_u).items()})
+            out["seen_gt_count"]   = int(gt_seen.sum().item())
+            out["unseen_gt_count"] = int(gt_unseen.sum().item())
+            out.update({f"seen_{k}":   v for k, v in _prf_from_counts(tp_s, fp_s, fn_s).items()})
+            out.update({f"unseen_{k}": v for k, v in _prf_from_counts(tp_u, fp_u, fn_u).items()})
 
         return out
 

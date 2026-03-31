@@ -43,14 +43,17 @@ from .unet3d_completion import DinoCompressor, DoubleConv, Up, OutConv
 def _sparse_block(in_channels: int, out_channels: int, stride: int = 1) -> nn.Sequential:
     """
     One sparse conv + GroupNorm + ReLU block.
-    stride=1  → SubMConv (same sparsity pattern, cheap)
-    stride=2  → strided SparseConv (downsamples & expands active set)
-    GroupNorm uses 1 group (= InstanceNorm equivalent) when C < 32,
-    otherwise 32 groups.
+    stride=1  → SubMConv (same sparsity pattern, cheap); padding=None triggers
+                the SubMConv3d path inside the SLAT SparseConv3d wrapper.
+    stride=2  → strided SparseConv (downsamples & expands active set);
+                padding=0 is required — spconv does not accept padding=None
+                for strided convolutions.
     """
     num_groups = min(32, out_channels)
+    padding = None if stride == 1 else 0
     return nn.Sequential(
-        SparseConv3d(in_channels, out_channels, kernel_size=3 if stride == 1 else 2, stride=stride),
+        SparseConv3d(in_channels, out_channels, kernel_size=3 if stride == 1 else 2,
+                     stride=stride, padding=padding),
         SparseGroupNorm(num_groups, out_channels),
         SparseReLU(inplace=True),
     )

@@ -5,20 +5,22 @@ Architecture
 ------------
 Input : dense [B, 1+feat_out, G, G, G]  (same interface as UNetCompletionModel)
 
-1. Extract occupied seed voxels from channel-0 (occupancy mask).
-2. Sparse encoder using the existing SLAT sparse module wrappers
-   (backend-agnostic: works with spconv or torchsparse):
-     Level 0 – SparseConv3d(k=3, s=1) ×2  → feats [N, c1],   resolution G
-     Level 1 – SparseConv3d(k=2, s=2) +×1 → feats [N', c2],  resolution G/2
-     Level 2 – SparseConv3d(k=2, s=2) +×1 → feats [N'', c3], resolution G/4
-     Level 3 – SparseConv3d(k=2, s=2) +×1 → feats [N''', c4],resolution G/8
-3. Densify each level via scatter → 4 dense feature maps (pure PyTorch, no
-   backend-specific .dense() call).
+1. Extract occupied seed voxels → SLAT SparseTensor.
+2. Sparse encoder via SLAT SparseConv3d wrappers (backend-agnostic: spconv or torchsparse):
+     Level 0 – SubMConv (stride 1) ×2  → [N, c1],   resolution G
+     Level 1 – SparseConv (stride 2)   → [N', c2],  resolution G/2
+     Level 2 – SparseConv (stride 2)   → [N'', c3], resolution G/4
+     Level 3 – SparseConv (stride 2)   → [N''', c4],resolution G/8
+3. Densify each level via pure-PyTorch scatter → 4 dense feature maps.
 4. Dense decoder (reuses DoubleConv / Up from unet3d_completion):
-     bottleneck at G/8, then up × 3 with skips → G output.
+     bottleneck at G/8, three up-blocks with skip connections → G.
 5. Output 1×1×1 conv → [B, out_channels, G, G, G]
 
 Output: dense [B, 1+latent_dim, G, G, G]  (identical interface to UNetCompletionModel)
+
+Memory advantage over plain UNet: the encoder stores [N, C] with N << G³
+(only occupied seed voxels), so levels 0–3 use a tiny fraction of the memory
+a full dense grid would require.
 """
 
 from __future__ import annotations
@@ -43,16 +45,17 @@ from .unet3d_completion import DinoCompressor, DoubleConv, Up, OutConv
 def _sparse_block(in_channels: int, out_channels: int, stride: int = 1) -> nn.Sequential:
     """
     One sparse conv + GroupNorm + ReLU block.
-    stride=1  → SubMConv (same sparsity pattern, cheap); padding=None triggers
-                the SubMConv3d path inside the SLAT SparseConv3d wrapper.
-    stride=2  → strided SparseConv (downsamples & expands active set);
-                padding=0 is required — spconv does not accept padding=None
-                for strided convolutions.
+    stride=1  → SubMConv3d path (same sparsity pattern); pass padding=None to
+                trigger that branch in the SLAT SparseConv3d wrapper.
+    stride=2  → strided SparseConv3d (downsamples & expands active set);
+                pass padding=0 — spconv does not accept padding=None for
+                strided convolutions.
     """
     num_groups = min(32, out_channels)
     padding = None if stride == 1 else 0
     return nn.Sequential(
-        SparseConv3d(in_channels, out_channels, kernel_size=3 if stride == 1 else 2,
+        SparseConv3d(in_channels, out_channels,
+                     kernel_size=3 if stride == 1 else 2,
                      stride=stride, padding=padding),
         SparseGroupNorm(num_groups, out_channels),
         SparseReLU(inplace=True),
@@ -61,15 +64,12 @@ def _sparse_block(in_channels: int, out_channels: int, stride: int = 1) -> nn.Se
 
 def sparse_to_dense(sp: SparseTensor, G: int) -> torch.Tensor:
     """
-    Scatter a SLAT SparseTensor back to a dense [B, C, G, G, G] tensor.
-    Uses pure PyTorch index_put_ — no backend-specific .dense() call.
-
-    Assumes coords are [N, 4]: (batch, x, y, z) in [0, G).
-    If a position has multiple features (shouldn't happen after conv), the
-    last write wins.
+    Scatter a SLAT SparseTensor to a dense [B, C, G, G, G] tensor.
+    Pure PyTorch — no backend-specific .dense() call.
+    Coords: [N, 4]  (batch, x, y, z) in [0, G).
     """
-    feats = sp.feats                        # [N, C]  float
-    coords = sp.coords.long()               # [N, 4]  (b, x, y, z)
+    feats = sp.feats                      # [N, C]
+    coords = sp.coords.long()             # [N, 4]
     N, C = feats.shape
     B = sp.shape[0]
     device = feats.device
@@ -79,8 +79,7 @@ def sparse_to_dense(sp: SparseTensor, G: int) -> torch.Tensor:
     y = coords[:, 2].clamp(0, G - 1)
     z = coords[:, 3].clamp(0, G - 1)
 
-    # Linear index into [B, G, G, G]
-    lin = b * (G * G * G) + x * (G * G) + y * G + z   # [N]
+    lin = b * (G * G * G) + x * (G * G) + y * G + z  # [N]
 
     dense_flat = torch.zeros(B * G * G * G, C, device=device, dtype=feats.dtype)
     dense_flat.index_put_((lin,), feats, accumulate=False)
@@ -92,56 +91,41 @@ def sparse_to_dense(sp: SparseTensor, G: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 class SparseEncoder(nn.Module):
-    """
-    Multi-scale sparse encoder.  Operates on seed voxels extracted from the
-    dense input grid.  Returns 4 dense feature maps (one per scale) that the
-    dense decoder can use as skip features.
-    """
-
     def __init__(self, in_channels: int, base_channels: int = 32) -> None:
         super().__init__()
         c1, c2, c3, c4 = (base_channels * m for m in (1, 2, 4, 8))
         self.channels: Tuple[int, int, int, int] = (c1, c2, c3, c4)
 
-        # Level 0: G,   in_channels → c1
         self.enc0a = _sparse_block(in_channels, c1, stride=1)
         self.enc0b = _sparse_block(c1,          c1, stride=1)
 
-        # Level 1: G/2, c1 → c2
-        self.down1  = _sparse_block(c1, c2, stride=2)
-        self.enc1   = _sparse_block(c2, c2, stride=1)
+        self.down1 = _sparse_block(c1, c2, stride=2)
+        self.enc1  = _sparse_block(c2, c2, stride=1)
 
-        # Level 2: G/4, c2 → c3
-        self.down2  = _sparse_block(c2, c3, stride=2)
-        self.enc2   = _sparse_block(c3, c3, stride=1)
+        self.down2 = _sparse_block(c2, c3, stride=2)
+        self.enc2  = _sparse_block(c3, c3, stride=1)
 
-        # Level 3: G/8, c3 → c4
-        self.down3  = _sparse_block(c3, c4, stride=2)
-        self.enc3   = _sparse_block(c4, c4, stride=1)
+        self.down3 = _sparse_block(c3, c4, stride=2)
+        self.enc3  = _sparse_block(c4, c4, stride=1)
 
     def _dense_to_sparse(self, x_dense: torch.Tensor) -> Optional[SparseTensor]:
-        """
-        Convert dense [B, C, G, G, G] to SLAT SparseTensor by keeping only
-        occupied voxels (where channel-0 > 0).
-        Coords format: [N, 4]  (batch, x, y, z), int32, sorted by batch.
-        """
+        """Extract occupied voxels (channel-0 > 0) into a SLAT SparseTensor."""
         B, C = x_dense.shape[:2]
         coord_list: List[torch.Tensor] = []
         feat_list: List[torch.Tensor] = []
         for b in range(B):
-            occ_b = x_dense[b, 0]                              # [G, G, G]
-            xyz = (occ_b > 0).nonzero(as_tuple=False).int()    # [N_b, 3]
+            xyz = (x_dense[b, 0] > 0).nonzero(as_tuple=False).int()  # [N_b, 3]
             if xyz.shape[0] == 0:
                 continue
             b_col = xyz.new_full((xyz.shape[0], 1), b)
-            coord_list.append(torch.cat([b_col, xyz], dim=1))  # [N_b, 4]
-            feats_b = x_dense[b, :, xyz[:, 0], xyz[:, 1], xyz[:, 2]].T  # [N_b, C]
-            feat_list.append(feats_b)
+            coord_list.append(torch.cat([b_col, xyz], dim=1))         # [N_b, 4]
+            feat_list.append(x_dense[b, :, xyz[:, 0], xyz[:, 1], xyz[:, 2]].T.float())
         if not coord_list:
             return None
-        coords = torch.cat(coord_list, dim=0).contiguous()
-        feats = torch.cat(feat_list, dim=0).float().contiguous()
-        return SparseTensor(feats=feats, coords=coords)
+        return SparseTensor(
+            feats=torch.cat(feat_list, dim=0).contiguous(),
+            coords=torch.cat(coord_list, dim=0).contiguous(),
+        )
 
     def forward(
         self, x_dense: torch.Tensor
@@ -149,8 +133,7 @@ class SparseEncoder(nn.Module):
         B = x_dense.shape[0]
         G = x_dense.shape[-1]
         c1, c2, c3, c4 = self.channels
-        device = x_dense.device
-        dtype = x_dense.dtype
+        device, dtype = x_dense.device, x_dense.dtype
 
         sp = self._dense_to_sparse(x_dense)
         if sp is None:
@@ -161,17 +144,17 @@ class SparseEncoder(nn.Module):
                 torch.zeros(B, c4, G//8, G//8, G//8, device=device, dtype=dtype),
             )
 
-        sp0 = self.enc0b(self.enc0a(sp))  # level 0: G
-        sp1 = self.enc1(self.down1(sp0))  # level 1: G/2
-        sp2 = self.enc2(self.down2(sp1))  # level 2: G/4
-        sp3 = self.enc3(self.down3(sp2))  # level 3: G/8
+        sp0 = self.enc0b(self.enc0a(sp))  # G
+        sp1 = self.enc1(self.down1(sp0))  # G/2
+        sp2 = self.enc2(self.down2(sp1))  # G/4
+        sp3 = self.enc3(self.down3(sp2))  # G/8
 
-        d0 = sparse_to_dense(sp0, G)
-        d1 = sparse_to_dense(sp1, G // 2)
-        d2 = sparse_to_dense(sp2, G // 4)
-        d3 = sparse_to_dense(sp3, G // 8)
-
-        return d0, d1, d2, d3
+        return (
+            sparse_to_dense(sp0, G),
+            sparse_to_dense(sp1, G // 2),
+            sparse_to_dense(sp2, G // 4),
+            sparse_to_dense(sp3, G // 8),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +162,6 @@ class SparseEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 class SparseDenseDecoder(nn.Module):
-    """
-    Standard UNet decoder that consumes the 4 skip feature maps from
-    SparseEncoder and reconstructs the full G³ prediction volume.
-    """
-
     def __init__(
         self,
         base_channels: int = 32,
@@ -195,19 +173,13 @@ class SparseDenseDecoder(nn.Module):
         c1, c2, c3, c4 = (base_channels * m for m in (1, 2, 4, 8))
         kw = dict(use_instance_norm=use_instance_norm, dropout_p=dropout_p)
 
-        self.bottleneck = DoubleConv(c4, c4, **kw)   # G/8
-        self.up3 = Up(c4, c3, c3, **kw)              # G/8 → G/4
-        self.up2 = Up(c3, c2, c2, **kw)              # G/4 → G/2
-        self.up1 = Up(c2, c1, c1, **kw)              # G/2 → G
+        self.bottleneck = DoubleConv(c4, c4, **kw)
+        self.up3 = Up(c4, c3, c3, **kw)
+        self.up2 = Up(c3, c2, c2, **kw)
+        self.up1 = Up(c2, c1, c1, **kw)
         self.outc = OutConv(c1, out_channels)
 
-    def forward(
-        self,
-        d0: torch.Tensor,
-        d1: torch.Tensor,
-        d2: torch.Tensor,
-        d3: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, d0, d1, d2, d3) -> torch.Tensor:
         x = self.bottleneck(d3)
         x = self.up3(x, d2)
         x = self.up2(x, d1)
@@ -240,10 +212,7 @@ class SparseCompletionNet(nn.Module):
 class SparseCompletionModel(nn.Module):
     """
     Drop-in replacement for UNetCompletionModel.
-
-    Identical interface: forward takes dense [B, 1+feat_out, G, G, G] and
-    returns [B, out_channels, G, G, G].  The feature_compressor attribute is
-    shared with the training pipeline so it can be called explicitly there.
+    Identical interface: forward takes [B, 1+feat_out, G, G, G] → [B, out_channels, G, G, G].
     """
 
     def __init__(

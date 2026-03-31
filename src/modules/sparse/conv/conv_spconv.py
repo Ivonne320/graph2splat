@@ -19,8 +19,6 @@ class SparseConv3d(nn.Module):
         indice_key=None,
     ):
         super(SparseConv3d, self).__init__()
-        if "spconv" not in globals():
-            import spconv.pytorch as spconv
         algo = None
         if SPCONV_ALGO == "native":
             algo = spconv.ConvAlgo.Native
@@ -101,8 +99,6 @@ class SparseInverseConv3d(nn.Module):
         indice_key=None,
     ):
         super(SparseInverseConv3d, self).__init__()
-        if "spconv" not in globals():
-            import spconv.pytorch as spconv
         self.conv = spconv.SparseInverseConv3d(
             in_channels, out_channels, kernel_size, bias=bias, indice_key=indice_key
         )

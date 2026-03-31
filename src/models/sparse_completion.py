@@ -144,13 +144,14 @@ class SparseEncoder(nn.Module):
                 torch.zeros(B, c4, G//8, G//8, G//8, device=device, dtype=dtype),
             )
 
-        sp0 = self.enc0b(self.enc0a(sp))  # G
+        sp0 = self.enc0b(self.enc0a(sp))  # G  — processed but not densified (too large)
         sp1 = self.enc1(self.down1(sp0))  # G/2
         sp2 = self.enc2(self.down2(sp1))  # G/4
         sp3 = self.enc3(self.down3(sp2))  # G/8
 
+        # d0 (full-res [B, c1, G, G, G]) is the dominant memory cost and is not returned.
+        # The decoder skips the finest-scale skip connection.
         return (
-            sparse_to_dense(sp0, G),
             sparse_to_dense(sp1, G // 2),
             sparse_to_dense(sp2, G // 4),
             sparse_to_dense(sp3, G // 8),
@@ -174,16 +175,20 @@ class SparseDenseDecoder(nn.Module):
         kw = dict(use_instance_norm=use_instance_norm, dropout_p=dropout_p)
 
         self.bottleneck = DoubleConv(c4, c4, **kw)
-        self.up3 = Up(c4, c3, c3, **kw)
-        self.up2 = Up(c3, c2, c2, **kw)
-        self.up1 = Up(c2, c1, c1, **kw)
+        self.up3 = Up(c4, c3, c3, **kw)              # G/8 → G/4
+        self.up2 = Up(c3, c2, c2, **kw)              # G/4 → G/2
+        # No full-res skip (d0 at G is too large); upsample G/2 → G with a plain DoubleConv
+        self.up1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False),
+            DoubleConv(c2, c1, **kw),
+        )
         self.outc = OutConv(c1, out_channels)
 
-    def forward(self, d0, d1, d2, d3) -> torch.Tensor:
+    def forward(self, d1, d2, d3) -> torch.Tensor:
         x = self.bottleneck(d3)
         x = self.up3(x, d2)
         x = self.up2(x, d1)
-        x = self.up1(x, d0)
+        x = self.up1(x)
         return self.outc(x)
 
 
@@ -205,8 +210,8 @@ class SparseCompletionNet(nn.Module):
         self.decoder = SparseDenseDecoder(base_channels, out_channels, use_instance_norm, dropout_p)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        d0, d1, d2, d3 = self.encoder(x)
-        return self.decoder(d0, d1, d2, d3)
+        d1, d2, d3 = self.encoder(x)
+        return self.decoder(d1, d2, d3)
 
 
 class SparseCompletionModel(nn.Module):

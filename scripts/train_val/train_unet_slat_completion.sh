@@ -56,4 +56,4 @@ cd "$VLSG_SPACE" || { echo "Failed to change directory to $VLSG_SPACE"; exit 1; 
 export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-splatting"
 
 # Run training script
-/cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/trainval/train_unet_slat_completion.py  --config scripts/train_val/train_structure.yaml --log_steps 1 output_dir=\"$VLSG_TRAINING_OUT_DIR\" ${args[@]}
+/cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/trainval/train_unet_slat_completion.py --resume --config scripts/train_val/train_structure.yaml --log_steps 1 output_dir=\"$VLSG_TRAINING_OUT_DIR\" ${args[@]}

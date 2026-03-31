@@ -198,7 +198,7 @@ train:
     seed_dropout_p: 0.4      # fraction of occupied seed voxels to zero out per step
     model_dropout_p: 0.1     # Dropout3d probability appended to each DoubleConv block
     weight_decay: 1.0e-4     # AdamW weight decay (overrides train.optim.weight_decay)
-    oob_coverage: true       # append OOB survival ratio as extra input channel (requires enable: true)
+    oob_coverage: false       # append OOB survival ratio as extra input channel (requires enable: true)
 
   data_aug:
     use_aug: False

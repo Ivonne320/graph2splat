@@ -60,6 +60,7 @@ class SlatCompletionInference:
 
         self.use_generalization = bool(getattr(args, "generalization", False))
         self._gen_model_dropout_p = float(getattr(args, "model_dropout_p", 0.1)) if self.use_generalization else 0.0
+        self.use_oob_coverage = bool(getattr(args, "oob_coverage", False)) and self.use_generalization
         self._mc_passes = int(getattr(args, "mc_passes", 1))
 
     @staticmethod
@@ -243,11 +244,13 @@ class SlatCompletionInference:
         self.seed_feat_dim = feat_dim
         LOGGER.info(f"feat_dim {feat_dim}")
 
+        extra_in = 1 if self.use_oob_coverage else 0
         model = UNetCompletionModel(
             feat_in=feat_dim,
             out_channels=1 + self.latent_dim,
             use_instance_norm=self.use_generalization,
             dropout_p=self._gen_model_dropout_p,
+            extra_in_channels=extra_in,
         ).to(self.device)
 
         checkpoint = self.args.unet_checkpoint
@@ -307,13 +310,21 @@ class SlatCompletionInference:
                 filter_oob=True,
             )
             comp = comp[valid]
+            if self.use_oob_coverage:
+                n_total = seed_idx_raw.shape[0]
+                n_valid = int(valid.sum().item())
+                coverage = n_valid / max(n_total, 1)
         else:
             idx_dst = self._remap_seed_idx_with_bbox(
                 seed_idx_raw, mean_seed, scale_seed, mean_gt, scale_gt, G,
             )
 
         grid_feats, seed_occ = self.scatter_voxel_mean(idx_dst.int(), comp.float(), G)
-        x_in = torch.cat([seed_occ, grid_feats], dim=1)
+        parts = [seed_occ, grid_feats]
+        if self.use_oob_coverage:
+            cov_vol = torch.full((1, 1, G, G, G), coverage, device=self.device)
+            parts.append(cov_vol)
+        x_in = torch.cat(parts, dim=1)
 
         meta = {
             "mean_gt": mean_gt.detach().cpu().numpy().astype(np.float32),
@@ -547,25 +558,63 @@ class SlatCompletionInference:
         return reconstruction, prepared, logits
 
     @staticmethod
-    def _compute_prf_metrics(probs: torch.Tensor, gt: torch.Tensor, threshold: float) -> Dict[str, float]:
+    @staticmethod
+    def _prf_from_counts(tp: float, fp: float, fn: float) -> Dict[str, float]:
+        precision = tp / (tp + fp + 1e-6)
+        recall    = tp / (tp + fn + 1e-6)
+        fscore    = 2 * precision * recall / (precision + recall + 1e-6)
+        return {"tp": tp, "fp": fp, "fn": fn,
+                "precision": precision, "recall": recall, "fscore": fscore}
+
+    @staticmethod
+    def _compute_prf_metrics(
+        probs: torch.Tensor,
+        gt: torch.Tensor,
+        threshold: float,
+        seed_occ: Optional[torch.Tensor] = None,
+    ) -> Dict[str, float]:
+        """
+        Compute precision / recall / F-score globally and, when seed_occ is
+        provided, split by:
+          - 'seen'   : GT voxels that overlap with the input seed grid
+          - 'unseen' : GT voxels that must be hallucinated (no seed overlap)
+        """
         gt_bin = (gt > 0.5).float()
-        pred = (probs >= threshold).float()
+        pred   = (probs >= threshold).float()
+
         tp = (pred * gt_bin).sum().item()
         fp = (pred * (1.0 - gt_bin)).sum().item()
         fn = ((1.0 - pred) * gt_bin).sum().item()
-        # test
-        precision = tp / (tp + fp + 1e-6)
-        recall = tp / (tp + fn + 1e-6)
-        fscore = 2 * precision * recall / (precision + recall + 1e-6)
 
-        return {
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
-            "precision": precision,
-            "recall": recall,
-            "fscore": fscore,
-        }
+        out = SlatCompletionInference._prf_from_counts(tp, fp, fn)
+
+        if seed_occ is not None:
+            seed_bin = (seed_occ > 0.5).float()
+
+            # Seen GT: ground-truth voxels that have a seed voxel present
+            gt_seen   = gt_bin * seed_bin
+            gt_unseen = gt_bin * (1.0 - seed_bin)
+
+            tp_s  = (pred * gt_seen).sum().item()
+            fn_s  = ((1.0 - pred) * gt_seen).sum().item()
+            # FP split: predicted voxels in seen vs unseen regions
+            fp_s  = (pred * (1.0 - gt_bin) * seed_bin).sum().item()
+
+            tp_u  = (pred * gt_unseen).sum().item()
+            fn_u  = ((1.0 - pred) * gt_unseen).sum().item()
+            fp_u  = (pred * (1.0 - gt_bin) * (1.0 - seed_bin)).sum().item()
+
+            seen_counts   = int(gt_seen.sum().item())
+            unseen_counts = int(gt_unseen.sum().item())
+
+            out["seen_gt_count"]   = seen_counts
+            out["unseen_gt_count"] = unseen_counts
+            out.update({f"seen_{k}":   v for k, v in
+                        SlatCompletionInference._prf_from_counts(tp_s, fp_s, fn_s).items()})
+            out.update({f"unseen_{k}": v for k, v in
+                        SlatCompletionInference._prf_from_counts(tp_u, fp_u, fn_u).items()})
+
+        return out
 
     # def evaluate_split(
     #     self,
@@ -661,6 +710,8 @@ class SlatCompletionInference:
         total_iou_03 = 0.0
         total_iou_05 = 0.0
         total_iou_07 = 0.0
+        total_seen_tp = total_seen_fp = total_seen_fn = 0.0
+        total_unseen_tp = total_unseen_fp = total_unseen_fn = 0.0
 
         total_mse = 0.0
         total_ssim = 0.0
@@ -709,6 +760,7 @@ class SlatCompletionInference:
                 probs,
                 prepared["occ_gt"],
                 eval_thr,
+                seed_occ=prepared.get("seed_occ"),
             )
             iou_metrics = self._compute_iou(
                 probs,
@@ -719,6 +771,12 @@ class SlatCompletionInference:
             total_tp += voxel_metrics["tp"]
             total_fp += voxel_metrics["fp"]
             total_fn += voxel_metrics["fn"]
+            total_seen_tp   += voxel_metrics.get("seen_tp", 0.0)
+            total_seen_fp   += voxel_metrics.get("seen_fp", 0.0)
+            total_seen_fn   += voxel_metrics.get("seen_fn", 0.0)
+            total_unseen_tp += voxel_metrics.get("unseen_tp", 0.0)
+            total_unseen_fp += voxel_metrics.get("unseen_fp", 0.0)
+            total_unseen_fn += voxel_metrics.get("unseen_fn", 0.0)
 
             total_iou_03 += float(iou_metrics[0.3].item())
             total_iou_05 += float(iou_metrics[0.5].item())
@@ -828,6 +886,14 @@ class SlatCompletionInference:
                 "iou_03": float(iou_metrics[0.3].item()),
                 "iou_05": float(iou_metrics[0.5].item()),
                 "iou_07": float(iou_metrics[0.7].item()),
+                "seen_precision":   voxel_metrics.get("seen_precision"),
+                "seen_recall":      voxel_metrics.get("seen_recall"),
+                "seen_fscore":      voxel_metrics.get("seen_fscore"),
+                "unseen_precision": voxel_metrics.get("unseen_precision"),
+                "unseen_recall":    voxel_metrics.get("unseen_recall"),
+                "unseen_fscore":    voxel_metrics.get("unseen_fscore"),
+                "seen_gt_count":    voxel_metrics.get("seen_gt_count"),
+                "unseen_gt_count":  voxel_metrics.get("unseen_gt_count"),
                 "photometric_views": photo_entries,
             }
 
@@ -882,6 +948,13 @@ class SlatCompletionInference:
         mean_iou_05 = total_iou_05 / processed
         mean_iou_07 = total_iou_07 / processed
 
+        seen_p   = total_seen_tp / (total_seen_tp + total_seen_fp + 1e-6)
+        seen_r   = total_seen_tp / (total_seen_tp + total_seen_fn + 1e-6)
+        seen_f   = 2 * seen_p * seen_r / (seen_p + seen_r + 1e-6)
+        unseen_p = total_unseen_tp / (total_unseen_tp + total_unseen_fp + 1e-6)
+        unseen_r = total_unseen_tp / (total_unseen_tp + total_unseen_fn + 1e-6)
+        unseen_f = 2 * unseen_p * unseen_r / (unseen_p + unseen_r + 1e-6)
+
         if photometric_count > 0:
             mean_mse = total_mse / photometric_count
             mean_psnr = 10.0 * math.log10(1.0 / max(mean_mse, 1e-8))
@@ -896,6 +969,12 @@ class SlatCompletionInference:
             "precision": precision,
             "recall": recall,
             "fscore": fscore,
+            "seen_precision": seen_p,
+            "seen_recall": seen_r,
+            "seen_fscore": seen_f,
+            "unseen_precision": unseen_p,
+            "unseen_recall": unseen_r,
+            "unseen_fscore": unseen_f,
             "iou_03": mean_iou_03,
             "iou_05": mean_iou_05,
             "iou_07": mean_iou_07,
@@ -907,11 +986,13 @@ class SlatCompletionInference:
         }
 
         LOGGER.info(
-            "[%s split] voxel precision=%.4f recall=%.4f F-score=%.4f | IoU@0.3=%.4f IoU@0.5=%.4f IoU@0.7=%.4f | PSNR=%.3f SSIM=%.4f LPIPS=%.4f over %d samples and %d rendered views",
+            "[%s split] voxel P=%.4f R=%.4f F=%.4f | seen F=%.4f | unseen F=%.4f | IoU@0.3=%.4f IoU@0.5=%.4f IoU@0.7=%.4f | PSNR=%.3f SSIM=%.4f LPIPS=%.4f over %d samples",
             split,
             precision,
             recall,
             fscore,
+            seen_f,
+            unseen_f,
             mean_iou_03,
             mean_iou_05,
             mean_iou_07,
@@ -919,7 +1000,6 @@ class SlatCompletionInference:
             mean_ssim,
             mean_lpips,
             processed,
-            photometric_count,
         )
 
         if save_json:
@@ -1286,6 +1366,8 @@ def parse_args() -> Tuple[argparse.Namespace, list[str]]:
     # generalization regularisation flags (must match training flags)
     parser.add_argument("--generalization", action="store_true", default=False,
                         help="Enable generalisation mode: OOB seed filter, InstanceNorm, model dropout.")
+    parser.add_argument("--oob_coverage", action="store_true", default=False,
+                        help="Append OOB survival ratio as extra input channel (must match training config).")
     parser.add_argument("--mc_passes", type=int, default=1,
                         help="Number of MC-dropout forward passes to average at inference (generalization only). "
                              "1 = deterministic eval mode. >1 = stochastic averaging with dropout active.")

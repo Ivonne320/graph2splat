@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import spconv.pytorch as spconv
 
 from .. import DEBUG, SparseTensor
 from . import SPCONV_ALGO

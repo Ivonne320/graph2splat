@@ -192,11 +192,12 @@ class UNetCompletionModel(nn.Module):
         out_channels: int = 1,
         use_instance_norm: bool = False,
         dropout_p: float = 0.0,
+        extra_in_channels: int = 0,
     ) -> None:
         super().__init__()
         self.feature_compressor = DinoCompressor(d_in=feat_in, d_mid=feat_mid, d_out=feat_out)
         self.unet = UNet3DCompletion(
-            in_channels=1 + feat_out,
+            in_channels=1 + feat_out + extra_in_channels,
             base_channels=base_channels,
             out_channels=out_channels,
             use_instance_norm=use_instance_norm,

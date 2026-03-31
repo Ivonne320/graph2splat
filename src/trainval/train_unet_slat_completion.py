@@ -61,11 +61,13 @@ class Trainer(EpochBasedTrainer):
         self.seed_dropout_p = float(getattr(_gen_cfg, "seed_dropout_p", 0.4)) if self.use_generalization else 0.0
         self._gen_model_dropout_p = float(getattr(_gen_cfg, "model_dropout_p", 0.1)) if self.use_generalization else 0.0
         self._gen_weight_decay = float(getattr(_gen_cfg, "weight_decay", 1e-4)) if self.use_generalization else cfg.train.optim.weight_decay
+        self.use_oob_coverage = bool(getattr(_gen_cfg, "oob_coverage", False)) and self.use_generalization
         if self.use_generalization:
             self.logger.info(
                 f"[generalization] seed_dropout={self.seed_dropout_p}, "
                 f"model_dropout={self._gen_model_dropout_p}, "
-                f"weight_decay={self._gen_weight_decay}"
+                f"weight_decay={self._gen_weight_decay}, "
+                f"oob_coverage={self.use_oob_coverage}"
             )
         # --------------------------------------------
         self.teacher_scene_use = bool(getattr(cfg.train, "teacher_scene_use", True))
@@ -416,11 +418,14 @@ class Trainer(EpochBasedTrainer):
 
     def create_model(self) -> UNetCompletionModel:
         out_channels = 1 + self.latent_dim
+        # +1 input channel for OOB coverage scalar when enabled
+        extra_in = 1 if self.use_oob_coverage else 0
         model = UNetCompletionModel(
             feat_in=self.seed_feat_dim,
             out_channels=out_channels,
             use_instance_norm=self.use_generalization,
             dropout_p=self._gen_model_dropout_p,
+            extra_in_channels=extra_in,
         ).to(self.device)
         # snapshot = getattr(self.cfg.train, "unet_completion_snapshot", None)
         # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/200scenes-debug/snapshots/epoch-15.pth.tar'
@@ -517,6 +522,10 @@ class Trainer(EpochBasedTrainer):
                     filter_oob=True,
                 )
                 feats_comp = feats_comp[valid]
+                if self.use_oob_coverage:
+                    n_total = seed_idx_raw.shape[0]
+                    n_valid = int(valid.sum().item())
+                    coverage = n_valid / max(n_total, 1)
             else:
                 idx_dst = self._remap_seed_idx_with_bbox(
                     seed_idx_raw, mean_seed, scale_seed, mean_gt, scale_gt, G,
@@ -533,7 +542,11 @@ class Trainer(EpochBasedTrainer):
                 grid_feats = grid_feats * keep.float()
 
             occ_vis_list[-1] = seed_occ
-            x_list.append(torch.cat([seed_occ, grid_feats], dim=1))
+            parts = [seed_occ, grid_feats]
+            if self.use_oob_coverage:
+                cov_vol = torch.full((1, 1, G, G, G), coverage, device=self.device)
+                parts.append(cov_vol)
+            x_list.append(torch.cat(parts, dim=1))
 
         occ_gt = torch.cat(occ_gt_list, dim=0)
         occ_vis = torch.cat(occ_vis_list, dim=0)

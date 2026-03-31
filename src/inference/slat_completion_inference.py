@@ -566,7 +566,6 @@ class SlatCompletionInference:
         return reconstruction, prepared, logits
 
     @staticmethod
-    @staticmethod
     def _compute_prf_metrics(
         probs: torch.Tensor,
         gt: torch.Tensor,

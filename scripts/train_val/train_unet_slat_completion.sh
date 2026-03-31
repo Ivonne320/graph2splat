@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -n 1
-#SBATCH --gpus=rtx_4090:1
+#SBATCH --gpus=rtx_3090:1
 #SBATCH --time=24:00:00
 #SBATCH --tmp=15G
 #SBATCH --cpus-per-task=6

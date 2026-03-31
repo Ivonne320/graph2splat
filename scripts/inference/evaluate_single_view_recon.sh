@@ -56,7 +56,7 @@ export PYTHONPATH="$VLSG_SPACE:$PYTHONPATH:$VLSG_SPACE/dependencies/gaussian-spl
 
 # Run training script
 /cluster/home/wangyih/miniconda3/envs/graph2splat/bin/python src/inference/slat_completion_inference.py --config scripts/train_val/train_structure.yaml \
-    --unet_checkpoint /cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/scene_id_check/snapshots/epoch-1.pth.tar \
+    --unet_checkpoint /cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/scene_id_check/snapshots/epoch-2.pth.tar \
     --teacher_checkpoint /cluster/scratch/wangyih/overfitting_dataset/pretrained/debug_gs/teacher/200scenes-128/snapshots/epoch-264.pth.tar \
     --eval_split val --max_eval 10000 --student_pack_root /cluster/scratch/wangyih/3RScan  --scene_id 02b33dfb-be2b-2d54-92d2-cd012b2b3c40  
     # --use_obj_id_filter --generalization --mc_passes 5

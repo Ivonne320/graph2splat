@@ -60,7 +60,6 @@ class SlatCompletionInference:
 
         self.use_generalization = bool(getattr(args, "generalization", False))
         self._gen_model_dropout_p = float(getattr(args, "model_dropout_p", 0.1)) if self.use_generalization else 0.0
-        self._gen_seed_dropout_p = float(getattr(args, "seed_dropout_p", 0.4)) if self.use_generalization else 0.0
         self._mc_passes = int(getattr(args, "mc_passes", 1))
 
     @staticmethod
@@ -331,11 +330,6 @@ class SlatCompletionInference:
             "meta": meta,
         }
 
-    def _apply_seed_dropout(self, x_in: torch.Tensor, p: float) -> torch.Tensor:
-        """Randomly zero occupied seed voxels in x_in (channel 0 = occupancy)."""
-        keep = (torch.rand_like(x_in[:, :1]) >= p)
-        return x_in * keep.float()
-
     def _run_unet(self, x_in: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.unet is None:
             raise RuntimeError("UNet not initialized")
@@ -348,8 +342,7 @@ class SlatCompletionInference:
                 # matching the distribution seen during training.
                 acc = None
                 for _ in range(self._mc_passes):
-                    x_pass = self._apply_seed_dropout(x_in, self._gen_seed_dropout_p)
-                    out = self.unet(x_pass)
+                    out = self.unet(x_in)
                     acc = out if acc is None else acc + out
                 logits_full = acc / self._mc_passes
         logits = logits_full[:, :1]

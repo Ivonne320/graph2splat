@@ -395,7 +395,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                     len(filtered), len(self.scan_ids), label,
                 )
                 # self.scan_ids = filtered
-                self.scan_ids = filtered[:10]
+                self.scan_ids = filtered
                 _LOGGER.info(f"scan_ids:{self.scan_ids}")
                 self.all_scans_split = self.scan_ids
         else:

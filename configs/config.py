@@ -184,6 +184,14 @@ class AutoencoderConfig(BaseModel):
 
 
 # Define training classes
+class GeneralizationConfig(BaseModel):
+    enable: bool = False
+    seed_dropout_p: float = 0.4
+    model_dropout_p: float = 0.1
+    weight_decay: float = 1e-4
+    oob_coverage: bool = False
+
+
 class OptimConfig(BaseModel):
     lr: float = 0.0005
     scheduler: str = "step"
@@ -250,6 +258,7 @@ class TrainConfig(BaseModel):
     inner_val_steps: int = 2000
     checkpoint_path: str='pretrained/scene_decoder_snapshot.pth.tar'
     object_level: bool = False
+    generalization: GeneralizationConfig = Field(default_factory=GeneralizationConfig)
 
 
 # Scene Graph Localizer

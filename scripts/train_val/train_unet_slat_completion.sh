@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -n 1
-#SBATCH --gpus=rtx_3090:1
+#SBATCH --gpus=rtx_4090:1
 #SBATCH --time=24:00:00
 #SBATCH --tmp=15G
 #SBATCH --cpus-per-task=6
@@ -47,7 +47,7 @@ timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 # export VLSG_TRAINING_OUT_DIR="$SCRATCH/training_structure_model/$timestamp"
 # export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_structure_model/2025-10-24_10_scenes_after_warm"
 # /cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/500scenes_use_obj_filter"
-export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/oob_test"
+export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/oob_test_500scenes"
 # Initialize conda and activate the environment
 source .venv/bin/activate
 

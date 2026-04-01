@@ -47,7 +47,7 @@ timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
 # export VLSG_TRAINING_OUT_DIR="$SCRATCH/training_structure_model/$timestamp"
 # export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_structure_model/2025-10-24_10_scenes_after_warm"
 # /cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/500scenes_use_obj_filter"
-export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/500scenes_use_obj_filter_with_gen_fix_oob_fix"
+export VLSG_TRAINING_OUT_DIR="/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/oob_test"
 # Initialize conda and activate the environment
 source .venv/bin/activate
 

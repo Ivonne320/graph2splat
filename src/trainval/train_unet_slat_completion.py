@@ -429,14 +429,14 @@ class Trainer(EpochBasedTrainer):
         ).to(self.device)
         # snapshot = getattr(self.cfg.train, "unet_completion_snapshot", None)
         # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/200scenes-debug/snapshots/epoch-15.pth.tar'
-        snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/10scenes-debug-with-photometric/snapshots/epoch-37.pth.tar'
-        if snapshot and osp.exists(snapshot):
-            state = torch.load(snapshot, map_location=self.device)
-            model_state = state.get("model", state)
-            missing, unexpected = model.load_state_dict(model_state, strict=False)
-            self.logger.info(
-                f"Loaded UNet snapshot {snapshot} (missing={missing}, unexpected={unexpected})"
-            )
+        # snapshot = '/cluster/scratch/wangyih/overfitting_dataset/pretrained/training_unet_slat_completion/student/10scenes-debug-with-photometric/snapshots/epoch-37.pth.tar'
+        # if snapshot and osp.exists(snapshot):
+        #     state = torch.load(snapshot, map_location=self.device)
+        #     model_state = state.get("model", state)
+        #     missing, unexpected = model.load_state_dict(model_state, strict=False)
+        #     self.logger.info(
+        #         f"Loaded UNet snapshot {snapshot} (missing={missing}, unexpected={unexpected})"
+        #     )
         return model
 
     def _load_aligned_pack(self, root_dir: str, scene_id: str, frame_id: str):

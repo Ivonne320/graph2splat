@@ -159,7 +159,7 @@ train:
   clip_grad: 0.4
   pc_res: 512
   aux_channels: 0
-  batch_size: 4
+  batch_size: 6
   num_workers: 1
   use_pretrained: False
   visualize_steps: 1
@@ -218,6 +218,6 @@ train:
 
 # for validation
 val:
-  batch_size: 4
+  batch_size: 6
   num_workers: 1
   pretrained: "./"

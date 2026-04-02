@@ -6,6 +6,7 @@ data :
   resplit: True
   preload_masks: False
   from_gt: True
+  use_obj_id_filter: True
   img:
     img_step: 1
     w: 960
@@ -195,7 +196,7 @@ train:
   # (InstanceNorm + Dropout3d), and separate weight_decay for AdamW.
   generalization:
     enable: true
-    seed_dropout_p: 0.4      # fraction of occupied seed voxels to zero out per step
+    seed_dropout_p: 0.2      # fraction of occupied seed voxels to zero out per step
     model_dropout_p: 0.1     # Dropout3d probability appended to each DoubleConv block
     weight_decay: 1.0e-4     # AdamW weight decay (overrides train.optim.weight_decay)
     oob_coverage: true       # append OOB survival ratio as extra input channel (requires enable: true)

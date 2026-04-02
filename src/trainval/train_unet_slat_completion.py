@@ -71,7 +71,7 @@ class Trainer(EpochBasedTrainer):
             )
         # --------------------------------------------
         self.teacher_scene_use = bool(getattr(cfg.train, "teacher_scene_use", True))
-        self.photometric = bool(getattr(cfg.train, "photometric", False))
+        self.photometric = bool(getattr(cfg.train, "photometric", True))
         self.teacher_scene_subdir = getattr(
             cfg.data, "teacher_scene_subdir", "scene_level_dinov2_128_no_dilation_clean"
         )

@@ -62,7 +62,8 @@ class Scan3RSceneBatchDataset(data.Dataset):
         self.scenes_dir = osp.join(cfg.data.root_dir, "scenes")
         self.scans_files_dir_mode = osp.join(self.scans_files_dir, "orig")
         self.use_student_structure = getattr(cfg.data, "use_student_structure", True)
-        self.use_obj_id_filter = getattr(cfg.data, "use_obj_id_filter", True)
+        # self.use_obj_id_filter = getattr(cfg.data, "use_obj_id_filter", True)
+        self.use_obj_id_filter = True
         self.student_structure_format = getattr(
             cfg.data, "student_structure_format", "sparse"
         )
@@ -395,7 +396,7 @@ class Scan3RSceneBatchDataset(data.Dataset):
                     len(filtered), len(self.scan_ids), label,
                 )
                 # self.scan_ids = filtered
-                self.scan_ids = filtered
+                self.scan_ids = filtered[:50]
                 _LOGGER.info(f"scan_ids:{self.scan_ids}")
                 self.all_scans_split = self.scan_ids
         else:
